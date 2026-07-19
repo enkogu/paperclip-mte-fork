@@ -505,6 +505,82 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
     expect(event?.message).toContain("Source-resolved watchdog fold");
   });
 
+  it("fails closed before recovery terminal mutation when environment lease release rejects", async () => {
+    const now = new Date("2026-04-22T20:00:00.000Z");
+    const { companyId, coderId, issueId, runId } = await seedRunningRun({
+      now,
+      ageMs: ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS + 60_000,
+      sourceStatus: "done",
+      sameRunTerminalEvidence: "activity",
+    });
+    const releaseError = new Error("sandbox provider rejected lease release");
+    const releaseEnvironmentLeasesForRun = vi.fn(async () => {
+      throw releaseError;
+    });
+    const recovery = recoveryService(db, {
+      enqueueWakeup: vi.fn(),
+      releaseEnvironmentLeasesForRun,
+    });
+
+    await expect(recovery.scanSilentActiveRuns({ now, companyId })).rejects.toBe(releaseError);
+    expect(releaseEnvironmentLeasesForRun).toHaveBeenCalledWith({
+      runId,
+      companyId,
+      agentId: coderId,
+      status: "succeeded",
+    });
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    const [source] = await db.select().from(issues).where(eq(issues.id, issueId));
+    const decisions = await db.select().from(heartbeatRunWatchdogDecisions).where(eq(heartbeatRunWatchdogDecisions.runId, runId));
+    const events = await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, runId));
+    const [agent] = await db.select().from(agents).where(eq(agents.id, coderId));
+    expect(run?.status).toBe("running");
+    expect(source?.executionRunId).toBe(runId);
+    expect(decisions).toHaveLength(0);
+    expect(events).toHaveLength(0);
+    expect(agent?.status).toBe("running");
+  });
+
+  it("emits no recovery side effects after losing terminal CAS ownership", async () => {
+    const now = new Date("2026-04-22T20:00:00.000Z");
+    const { companyId, coderId, issueId, runId } = await seedRunningRun({
+      now,
+      ageMs: ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS + 60_000,
+      sourceStatus: "done",
+      sameRunTerminalEvidence: "activity",
+    });
+    const recovery = recoveryService(db, {
+      enqueueWakeup: vi.fn(),
+      releaseEnvironmentLeasesForRun: vi.fn(async () => {
+        await finalizeTerminalRun(db, {
+          runId,
+          expectedStatus: "running",
+          status: "failed",
+          runPatch: { finishedAt: now, error: "competing finalizer" },
+          wakeupRequestId: null,
+          wakeupStatus: "failed",
+          wakeupError: "competing finalizer",
+          now,
+        });
+      }),
+    });
+
+    const result = await recovery.scanSilentActiveRuns({ now, companyId });
+
+    expect(result).toMatchObject({ scanned: 1, folded: 0, skipped: 1 });
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    const [source] = await db.select().from(issues).where(eq(issues.id, issueId));
+    const decisions = await db.select().from(heartbeatRunWatchdogDecisions).where(eq(heartbeatRunWatchdogDecisions.runId, runId));
+    const events = await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, runId));
+    const [agent] = await db.select().from(agents).where(eq(agents.id, coderId));
+    expect(run).toMatchObject({ status: "failed", error: "competing finalizer" });
+    expect(run?.resultJson).not.toHaveProperty("sourceResolvedWatchdogFold");
+    expect(source?.executionRunId).toBe(runId);
+    expect(decisions).toHaveLength(0);
+    expect(events).toHaveLength(0);
+    expect(agent?.status).toBe("running");
+  });
+
   it("still escalates terminal source issues without same-run terminal evidence", async () => {
     const now = new Date("2026-04-22T20:00:00.000Z");
     const { companyId, runId } = await seedRunningRun({
@@ -1012,3 +1088,7 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
     expect(decision.createdByRunId).toBe(managerRunId);
   });
 });
+
+// Keep this import after the fixtures so their exact reviewed gitleaks
+// fingerprints remain stable when this behavior test evolves.
+import { finalizeTerminalRun } from "../services/terminal-run-finalizer.ts";

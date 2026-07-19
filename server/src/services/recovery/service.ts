@@ -68,6 +68,7 @@ import {
   withRecoveryModelProfileHint,
 } from "./model-profile-hint.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "./pause-hold-guard.js";
+import { finalizeTerminalRun } from "../terminal-run-finalizer.js";
 
 const EXECUTION_PATH_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
 const UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES = ["failed", "cancelled", "timed_out"] as const;
@@ -515,7 +516,16 @@ function buildLivenessOriginalIssueComment(finding: IssueLivenessFinding, escala
   ].join("\n");
 }
 
-export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup }) {
+export function recoveryService(db: Db, deps: {
+  enqueueWakeup: RecoveryWakeup;
+  releaseEnvironmentLeasesForRun?: (input: {
+    runId: string;
+    companyId: string;
+    agentId: string;
+    status: string | null | undefined;
+    failureReason?: string | null;
+  }) => Promise<void>;
+}) {
   const issuesSvc = issueService(db);
   const recoveryActionsSvc = issueRecoveryActionService(db);
   const treeControlSvc = issueTreeControlService(db);
@@ -1297,70 +1307,81 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     now: Date;
   }) {
     if (!input.evidence) return { kind: "skipped" as const };
-    const cleanup = await cleanupSourceResolvedRunProcess({ run: input.run, runningAgent: input.runningAgent });
     const finalRunStatus = input.sourceIssue.status === "cancelled" ? "cancelled" : "succeeded";
-    const resultJson = {
-      ...parseObject(input.run.resultJson),
-      sourceResolvedWatchdogFold: {
-        sourceIssueId: input.sourceIssue.id,
-        sourceIssueIdentifier: input.sourceIssue.identifier,
-        sourceIssueStatus: input.sourceIssue.status,
-        sameRunEvidenceKind: input.evidence.kind,
-        sameRunEvidenceId: input.evidence.id,
-        sameRunEvidenceAt: input.evidence.createdAt.toISOString(),
-        silenceStartedAt: input.silenceStartedAt?.toISOString() ?? null,
-        silenceAgeMs: input.silenceAgeMs,
-        evaluationIssueId: input.existingEvaluation?.id ?? null,
-        evaluationIssueIdentifier: input.existingEvaluation?.identifier ?? null,
-        cleanup,
-      },
-    };
-    const finalizedRun = await db.transaction(async (tx) => {
-      const [updatedRun] = await tx
-        .update(heartbeatRuns)
-        .set({
-          status: finalRunStatus,
+    if (!deps.releaseEnvironmentLeasesForRun) {
+      throw new Error("Recovery terminal finalization requires environment lease release support");
+    }
+    await deps.releaseEnvironmentLeasesForRun({
+      runId: input.run.id,
+      companyId: input.run.companyId,
+      agentId: input.run.agentId,
+      status: finalRunStatus,
+    });
+
+    const finalized = await db.transaction(async (tx) => {
+      // Lock and revalidate after external lease release. This prevents process
+      // cleanup or any database side effect when a competing finalizer won.
+      const ownedRun = await tx
+        .select()
+        .from(heartbeatRuns)
+        .where(and(
+          eq(heartbeatRuns.id, input.run.id),
+          eq(heartbeatRuns.companyId, input.run.companyId),
+        ))
+        .for("update")
+        .then((rows) => rows[0] ?? null);
+      if (ownedRun?.status !== "running") return null;
+
+      const cleanup = await cleanupSourceResolvedRunProcess({
+        run: ownedRun,
+        runningAgent: input.runningAgent,
+      });
+      const resultJson = {
+        ...parseObject(ownedRun.resultJson),
+        sourceResolvedWatchdogFold: {
+          sourceIssueId: input.sourceIssue.id,
+          sourceIssueIdentifier: input.sourceIssue.identifier,
+          sourceIssueStatus: input.sourceIssue.status,
+          sameRunEvidenceKind: input.evidence.kind,
+          sameRunEvidenceId: input.evidence.id,
+          sameRunEvidenceAt: input.evidence.createdAt.toISOString(),
+          silenceStartedAt: input.silenceStartedAt?.toISOString() ?? null,
+          silenceAgeMs: input.silenceAgeMs,
+          evaluationIssueId: input.existingEvaluation?.id ?? null,
+          evaluationIssueIdentifier: input.existingEvaluation?.identifier ?? null,
+          cleanup,
+        },
+      };
+      const write = await finalizeTerminalRun(db, {
+        runId: ownedRun.id,
+        expectedStatus: "running",
+        status: finalRunStatus,
+        runPatch: {
           finishedAt: input.now,
           error: null,
           errorCode: null,
           resultJson,
-          updatedAt: input.now,
-        })
-        .where(and(eq(heartbeatRuns.id, input.run.id), eq(heartbeatRuns.companyId, input.run.companyId), eq(heartbeatRuns.status, "running")))
-        .returning();
-      if (!updatedRun) return null;
-
-      if (input.run.wakeupRequestId) {
-        await tx
-          .update(agentWakeupRequests)
-          .set({
-            status: finalRunStatus === "succeeded" ? "completed" : "cancelled",
-            finishedAt: input.now,
-            error: null,
-            updatedAt: input.now,
-          })
-          .where(and(eq(agentWakeupRequests.id, input.run.wakeupRequestId), eq(agentWakeupRequests.companyId, input.run.companyId)));
-      }
-
-      await tx
-        .update(issues)
-        .set({
-          executionRunId: null,
-          executionAgentNameKey: null,
-          executionLockedAt: null,
-          updatedAt: input.now,
-        })
-        .where(
-          and(
-            eq(issues.id, input.sourceIssue.id),
-            eq(issues.companyId, input.run.companyId),
-            eq(issues.executionRunId, input.run.id),
-          ),
-        );
-
-      return updatedRun;
+        },
+        wakeupRequestId: ownedRun.wakeupRequestId,
+        wakeupStatus: finalRunStatus === "succeeded" ? "completed" : "cancelled",
+        wakeupError: null,
+        taskSession: { kind: "none" },
+        issueUnlock: { companyId: ownedRun.companyId, issueId: input.sourceIssue.id },
+        runEvent: {
+          eventType: "lifecycle",
+          stream: "system",
+          level: cleanup.outcome === "failed" ? "warn" : "info",
+          message: "Source-resolved watchdog fold finalized stale active run",
+          payload: resultJson.sourceResolvedWatchdogFold,
+        },
+        now: input.now,
+      }, tx);
+      return write.updated ? { run: write.run, cleanup, resultJson } : null;
     });
-    if (!finalizedRun) return { kind: "skipped" as const };
+    if (!finalized) return { kind: "skipped" as const };
+    const finalizedRun = finalized.run;
+    const cleanup = finalized.cleanup;
+    const resultJson = finalized.resultJson;
 
     if (input.existingEvaluation && !isTerminalIssueStatus(input.existingEvaluation.status)) {
       await issuesSvc.update(input.existingEvaluation.id, { status: "done" });
@@ -1398,11 +1419,6 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       })
       .returning();
 
-    await appendRecoveryRunEvent(finalizedRun, {
-      level: cleanup.outcome === "failed" ? "warn" : "info",
-      message: "Source-resolved watchdog fold finalized stale active run",
-      payload: resultJson.sourceResolvedWatchdogFold,
-    });
     await logActivity(db, {
       companyId: input.run.companyId,
       actorType: "system",

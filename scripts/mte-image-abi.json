@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "verifyCommand": ["node", "/app/image-abi/verify.mjs"],
+  "packages": {
+    "daytonaPlugin": "/app/plugins/daytona",
+    "daytonaSdk": "/app/plugins/daytona/node_modules/@daytonaio/sdk",
+    "pluginSdk": "/app/plugins/daytona/node_modules/@paperclipai/plugin-sdk",
+    "pluginShared": "/app/plugins/daytona/local/plugin-sdk/node_modules/@paperclipai/shared",
+    "piControlPlaneAdapter": "/app/server/node_modules/@paperclipai/adapter-pi-local",
+    "s3ControlPlaneClient": "/app/server/node_modules/@aws-sdk/client-s3"
+  }
+}

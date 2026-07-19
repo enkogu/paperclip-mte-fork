@@ -1,0 +1,181 @@
+name: MTE image publish
+
+on:
+  push:
+    tags: [mte-v*]
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+concurrency:
+  group: mte-image-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Set up checksum-pinned official gitleaks
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Verify exact immutable tag identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_TYPE" == "tag" ]]
+          [[ "$GITHUB_REF_NAME" =~ ^mte-v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
+          test "$(git rev-list -n 1 "refs/tags/$GITHUB_REF_NAME")" = "$GITHUB_SHA"
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/paperclip-mte" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=$GITHUB_REF_NAME" >> "$GITHUB_ENV"
+      - run: node scripts/verify-mte-fork.mjs
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.11.1
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Push by content digest only. Registry tags are mutable and the registry
+      # API has no portable conditional-create operation, so an inspect-then-tag
+      # flow always has a TOCTOU overwrite race. The signed digest is the release
+      # reference; the git tag and commit are bound into its labels/provenance.
+      - name: Publish immutable digest
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.18.0
+        with:
+          context: .
+          file: Dockerfile.mte
+          platforms: linux/amd64
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            VCS_REF=${{ github.sha }}
+            SOURCE_REPOSITORY=${{ github.server_url }}/${{ github.repository }}
+            IMAGE_VERSION=${{ env.IMAGE_TAG }}
+          provenance: mode=max
+          sbom: true
+      - name: Verify exact published digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker buildx imagetools inspect "$IMAGE@$DIGEST"
+      - name: Verify exact-digest SBOM and provenance attestations
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker buildx imagetools inspect "$IMAGE@$DIGEST" --format '{{json .SBOM}}' \
+            | jq -e 'type == "object" and length > 0' >/dev/null
+          docker buildx imagetools inspect "$IMAGE@$DIGEST" --format '{{json .Provenance}}' \
+            | jq -e 'type == "object" and length > 0' >/dev/null
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.10.1
+      - name: Sign and verify published digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$DIGEST"
+          cosign sign --yes "$IMAGE@$DIGEST"
+          cosign verify \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/mte-image-publish.yml@refs/tags/${GITHUB_REF_NAME}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$IMAGE@$DIGEST"
+      - name: Finalize exact idempotent release record
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          metadata="$RUNNER_TEMP/paperclip-mte-image.json"
+          notes="$RUNNER_TEMP/paperclip-mte-release.md"
+          existing="$RUNNER_TEMP/paperclip-mte-existing-release.json"
+          jq -n \
+            --arg image "$IMAGE" \
+            --arg digest "$DIGEST" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg gitTag "$GITHUB_REF_NAME" \
+            --arg gitRef "$GITHUB_REF" \
+            --arg commit "$GITHUB_SHA" \
+            '{schemaVersion: 1, image: $image, digest: $digest, immutableRef: ($image + "@" + $digest), sourceRepository: $repository, gitTag: $gitTag, gitRef: $gitRef, commit: $commit}' \
+            > "$metadata"
+          printf '%s\n\n%s\n\n```json\n' \
+            "Immutable Paperclip MTE image for \`$GITHUB_REF_NAME\`." \
+            "Pull by digest: \`$IMAGE@$DIGEST\`." \
+            > "$notes"
+          jq -cS . "$metadata" >> "$notes"
+          printf '\n```\n' >> "$notes"
+
+          lookup_release() {
+            local code
+            code="$(curl --silent --show-error \
+              --output "$existing" \
+              --write-out '%{http_code}' \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME")"
+            case "$code" in
+              200|404) RELEASE_LOOKUP_STATUS="$code" ;;
+              *) echo "release lookup failed closed with HTTP $code" >&2; return 1 ;;
+            esac
+          }
+
+          verify_exact_existing_release() {
+            jq -e \
+              --arg tag "$GITHUB_REF_NAME" \
+              --arg name "$GITHUB_REF_NAME" \
+              --rawfile body "$notes" \
+              '.tag_name == $tag and .name == $name and .body == $body and .draft == false and .prerelease == false and (.assets | length) == 0' \
+              "$existing" >/dev/null
+          }
+
+          verify_remote_tag() {
+            local verification_ref="refs/tags/__paperclip_mte_remote_verify"
+            git update-ref -d "$verification_ref" 2>/dev/null || true
+            git fetch --no-tags --force origin \
+              "+refs/tags/$GITHUB_REF_NAME:$verification_ref"
+            test "$(git rev-parse "$verification_ref^{commit}")" = "$GITHUB_SHA"
+            git update-ref -d "$verification_ref"
+          }
+
+          lookup_release
+          # Re-resolve the remote tag immediately before accepting or creating
+          # the final record; local checkout identity is not publication proof.
+          verify_remote_tag
+          if [[ "$RELEASE_LOOKUP_STATUS" == 200 ]]; then
+            verify_exact_existing_release
+            echo "Exact release record already exists; retry is complete."
+            exit 0
+          fi
+
+          # The immutable metadata is the release body itself, so creation is a
+          # single atomic API object with no partial asset/upload state.
+          if gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file "$notes" \
+            --latest=false; then
+            exit 0
+          fi
+
+          # A concurrent identical publisher may have won after the 404. Only
+          # an authoritative retry lookup plus exact body match is acceptable.
+          lookup_release
+          test "$RELEASE_LOOKUP_STATUS" = 200
+          verify_remote_tag
+          verify_exact_existing_release

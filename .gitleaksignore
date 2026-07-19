@@ -1,0 +1,26 @@
+# Reviewed curl authorization-header fixture
+scripts/smoke/hermes-gateway-e2e.sh:curl-auth-header:610
+
+# Reviewed generic API-key test and documentation fixtures
+doc/logs/2026-05-24-cli-api-parity-e2e-log.md:generic-api-key:34
+doc/logs/2026-05-24-cli-api-parity-e2e-log.md:generic-api-key:35
+docs/deploy/secrets.md:generic-api-key:507
+server/src/__tests__/company-artifacts-service.test.ts:generic-api-key:233
+server/src/__tests__/environment-custom-images-service.test.ts:generic-api-key:543
+server/src/__tests__/invite-accept-gateway-defaults.test.ts:generic-api-key:155
+server/src/__tests__/invite-accept-gateway-defaults.test.ts:generic-api-key:178
+server/src/__tests__/invite-accept-gateway-defaults.test.ts:generic-api-key:203
+server/src/__tests__/invite-accept-gateway-defaults.test.ts:generic-api-key:233
+server/src/__tests__/redact-sensitive.test.ts:generic-api-key:6
+server/src/__tests__/secrets-service.test.ts:generic-api-key:2089
+server/src/__tests__/secrets-service.test.ts:generic-api-key:2440
+
+# Reviewed JWT redaction fixtures
+server/src/__tests__/heartbeat-active-run-output-watchdog.test.ts:jwt:293
+server/src/__tests__/redaction.test.ts:jwt:68
+
+# Reviewed private-key fixtures
+packages/plugins/sandbox-providers/exe-dev/src/plugin.test.ts:private-key:170
+packages/plugins/sandbox-providers/exe-dev/src/plugin.test.ts:private-key:179
+packages/plugins/sandbox-providers/exe-dev/src/plugin.test.ts:private-key:246
+packages/plugins/sandbox-providers/exe-dev/src/plugin.ts:private-key:170

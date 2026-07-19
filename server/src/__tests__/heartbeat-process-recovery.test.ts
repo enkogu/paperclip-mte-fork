@@ -193,6 +193,7 @@ async function cancelActiveRunsForCleanup(
     const activeRuns = await db
       .select({
         id: heartbeatRuns.id,
+        status: heartbeatRuns.status,
         wakeupRequestId: heartbeatRuns.wakeupRequestId,
       })
       .from(heartbeatRuns)
@@ -206,23 +207,28 @@ async function cancelActiveRunsForCleanup(
     if (activeRuns.length === 0) return;
 
     const now = new Date();
-    const runIds = activeRuns.map((run) => run.id);
     const wakeupRequestIds = activeRuns
       .map((run) => run.wakeupRequestId)
       .filter((value): value is string => typeof value === "string" && value.length > 0);
 
-    await db
-      .update(heartbeatRuns)
-      .set({
+    for (const run of activeRuns) {
+      await finalizeTerminalRun(db, {
+        runId: run.id,
+        expectedStatus: run.status,
         status: "cancelled",
-        finishedAt: now,
-        updatedAt: now,
-        errorCode: "test_cleanup",
-        error: "Cancelled by heartbeat-process-recovery test cleanup",
-        processPid: null,
-        processGroupId: null,
-      })
-      .where(inArray(heartbeatRuns.id, runIds));
+        runPatch: {
+          finishedAt: now,
+          errorCode: "test_cleanup",
+          error: "Cancelled by heartbeat-process-recovery test cleanup",
+          processPid: null,
+          processGroupId: null,
+        },
+        wakeupRequestId: null,
+        wakeupStatus: "cancelled",
+        wakeupError: "Cancelled by heartbeat-process-recovery test cleanup",
+        now,
+      });
+    }
 
     if (wakeupRequestIds.length > 0) {
       await db
@@ -2745,23 +2751,16 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   it("re-enqueues an already stranded execution-review participant during reconciliation", async () => {
     const { agentId, issueId, runId, wakeupRequestId, stageId } = await seedInReviewParticipantRunFixture();
     const finishedAt = new Date("2026-03-19T00:05:00.000Z");
-    await db
-      .update(heartbeatRuns)
-      .set({
-        status: "succeeded",
-        startedAt: new Date("2026-03-19T00:00:00.000Z"),
-        finishedAt,
-        updatedAt: finishedAt,
-      })
-      .where(eq(heartbeatRuns.id, runId));
-    await db
-      .update(agentWakeupRequests)
-      .set({
-        status: "completed",
-        finishedAt,
-        updatedAt: finishedAt,
-      })
-      .where(eq(agentWakeupRequests.id, wakeupRequestId));
+    await finalizeTerminalRun(db, {
+      runId,
+      expectedStatus: "queued",
+      status: "succeeded",
+      runPatch: { startedAt: new Date("2026-03-19T00:00:00.000Z"), finishedAt },
+      wakeupRequestId,
+      wakeupStatus: "completed",
+      wakeupError: null,
+      now: finishedAt,
+    });
     const heartbeat = heartbeatService(db);
 
     const result = await heartbeat.reconcileStrandedAssignedIssues();
@@ -2799,23 +2798,16 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const otherRunId = randomUUID();
     const finishedAt = new Date("2026-03-19T00:05:00.000Z");
 
-    await db
-      .update(heartbeatRuns)
-      .set({
-        status: "succeeded",
-        startedAt: new Date("2026-03-19T00:00:00.000Z"),
-        finishedAt,
-        updatedAt: finishedAt,
-      })
-      .where(eq(heartbeatRuns.id, runId));
-    await db
-      .update(agentWakeupRequests)
-      .set({
-        status: "completed",
-        finishedAt,
-        updatedAt: finishedAt,
-      })
-      .where(eq(agentWakeupRequests.id, wakeupRequestId));
+    await finalizeTerminalRun(db, {
+      runId,
+      expectedStatus: "queued",
+      status: "succeeded",
+      runPatch: { startedAt: new Date("2026-03-19T00:00:00.000Z"), finishedAt },
+      wakeupRequestId,
+      wakeupStatus: "completed",
+      wakeupError: null,
+      now: finishedAt,
+    });
 
     await db.insert(agents).values({
       id: otherAgentId,
@@ -2880,23 +2872,16 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const otherWakeId = randomUUID();
     const finishedAt = new Date("2026-03-19T00:05:00.000Z");
 
-    await db
-      .update(heartbeatRuns)
-      .set({
-        status: "succeeded",
-        startedAt: new Date("2026-03-19T00:00:00.000Z"),
-        finishedAt,
-        updatedAt: finishedAt,
-      })
-      .where(eq(heartbeatRuns.id, runId));
-    await db
-      .update(agentWakeupRequests)
-      .set({
-        status: "completed",
-        finishedAt,
-        updatedAt: finishedAt,
-      })
-      .where(eq(agentWakeupRequests.id, wakeupRequestId));
+    await finalizeTerminalRun(db, {
+      runId,
+      expectedStatus: "queued",
+      status: "succeeded",
+      runPatch: { startedAt: new Date("2026-03-19T00:00:00.000Z"), finishedAt },
+      wakeupRequestId,
+      wakeupStatus: "completed",
+      wakeupError: null,
+      now: finishedAt,
+    });
 
     await db.insert(agents).values({
       id: otherAgentId,
@@ -3135,26 +3120,24 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       })
       .where(eq(issues.id, issueId));
     await db
-      .update(heartbeatRuns)
-      .set({
-        status: "failed",
+      .update(agentWakeupRequests)
+      .set({ claimedAt: new Date("2026-03-19T00:00:00.000Z") })
+      .where(eq(agentWakeupRequests.id, wakeupRequestId));
+    await finalizeTerminalRun(db, {
+      runId,
+      expectedStatus: "queued",
+      status: "failed",
+      runPatch: {
         startedAt: new Date("2026-03-19T00:00:00.000Z"),
         finishedAt,
-        updatedAt: finishedAt,
         errorCode: "adapter_failed",
         error: "review recovery failed before submitting a decision",
-      })
-      .where(eq(heartbeatRuns.id, runId));
-    await db
-      .update(agentWakeupRequests)
-      .set({
-        status: "failed",
-        claimedAt: new Date("2026-03-19T00:00:00.000Z"),
-        finishedAt,
-        updatedAt: finishedAt,
-        error: "review recovery failed before submitting a decision",
-      })
-      .where(eq(agentWakeupRequests.id, wakeupRequestId));
+      },
+      wakeupRequestId,
+      wakeupStatus: "failed",
+      wakeupError: "review recovery failed before submitting a decision",
+      now: finishedAt,
+    });
     const heartbeat = heartbeatService(db);
 
     const result = await heartbeat.reconcileStrandedAssignedIssues();
@@ -4535,3 +4518,5 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(runs).toHaveLength(1);
   });
 });
+
+import { finalizeTerminalRun } from "../services/terminal-run-finalizer.ts";

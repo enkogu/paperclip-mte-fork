@@ -429,6 +429,42 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
     expect(rows[0]?.status).toBe("released");
   });
 
+  it("fails closed when a driver does not release an active run lease", async () => {
+    const { companyId, environment, runId } = await seedEnvironment();
+    const acquired = await runtime.acquireRunLease({
+      companyId,
+      environment,
+      issueId: null,
+      heartbeatRunId: runId,
+      persistedExecutionWorkspace: null,
+    });
+    const refusingRuntime = environmentRuntimeService(db, {
+      drivers: [{
+        driver: "local",
+        acquireRunLease: async () => acquired.lease,
+        releaseRunLease: async () => null,
+      }],
+    });
+
+    await expect(refusingRuntime.releaseRunLeases(runId)).rejects.toThrow(
+      `Environment driver did not release active lease ${acquired.lease.id}.`,
+    );
+    await expect(environmentService(db).getLeaseById(acquired.lease.id)).resolves.toMatchObject({
+      status: "active",
+    });
+
+    const stillActiveRuntime = environmentRuntimeService(db, {
+      drivers: [{
+        driver: "local",
+        acquireRunLease: async () => acquired.lease,
+        releaseRunLease: async () => acquired.lease,
+      }],
+    });
+    await expect(stillActiveRuntime.releaseRunLeases(runId)).rejects.toThrow(
+      `Environment driver returned active lease ${acquired.lease.id} after release.`,
+    );
+  });
+
   it("allows projectless runs through the runtime seam", async () => {
     const { companyId, environment, runId } = await seedEnvironment();
 

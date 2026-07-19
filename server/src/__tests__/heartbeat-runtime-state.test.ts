@@ -254,14 +254,16 @@ describeEmbeddedPostgres("heartbeat runtime state deduplication", () => {
       });
 
       liveEvents.length = 0;
-      await db
-        .update(heartbeatRuns)
-        .set({
-          status: "succeeded",
-          finishedAt: new Date("2026-06-24T00:01:00.000Z"),
-          updatedAt: new Date("2026-06-24T00:01:00.000Z"),
-        })
-        .where(eq(heartbeatRuns.id, runId));
+      await finalizeTerminalRun(db, {
+        runId,
+        expectedStatus: "running",
+        status: "succeeded",
+        runPatch: { finishedAt: new Date("2026-06-24T00:01:00.000Z") },
+        wakeupRequestId: null,
+        wakeupStatus: "completed",
+        wakeupError: null,
+        now: new Date("2026-06-24T00:01:00.000Z"),
+      });
 
       const lateStatus = await heartbeat.recordRuntimeProgress(staleRunningRun, {
         phase: "finalize",
@@ -279,3 +281,5 @@ describeEmbeddedPostgres("heartbeat runtime state deduplication", () => {
     }
   });
 });
+
+import { finalizeTerminalRun } from "../services/terminal-run-finalizer.ts";

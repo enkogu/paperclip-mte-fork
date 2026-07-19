@@ -525,10 +525,15 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     ]);
 
     runningProcesses.delete(activeRunId);
-    await db
-      .update(heartbeatRuns)
-      .set({ status: "succeeded", finishedAt: new Date(), updatedAt: new Date() })
-      .where(eq(heartbeatRuns.id, activeRunId));
+    await finalizeTerminalRun(db, {
+      runId: activeRunId,
+      expectedStatus: "running",
+      status: "succeeded",
+      runPatch: { finishedAt: new Date() },
+      wakeupRequestId: null,
+      wakeupStatus: "completed",
+      wakeupError: null,
+    });
   });
 
   it("honors maxConcurrentRuns 1 by leaving a second assignment wake queued", async () => {
@@ -1105,3 +1110,5 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     });
   });
 });
+
+import { finalizeTerminalRun } from "../services/terminal-run-finalizer.ts";

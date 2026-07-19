@@ -10,23 +10,18 @@ describing the resulting runtime.
 
 ## Smallest alternative
 
-`apply.py` adds a separate `Dockerfile.mte`; it does not modify the upstream
-`Dockerfile`. The image pins its base by digest, builds the Paperclip server,
-CLI, plugin SDK, and Daytona provider from this checkout, and installs no
-Codex, Claude Code, OpenCode, Gemini, or similar agent-harness CLI.
-
-Apply from the repository root:
-
-```sh
-python3 patches/mte-immutable-runtime/apply.py
-```
-
-The script first runs `git apply --check`, then applies an embedded unified
-diff. It refuses to overwrite an existing target.
+`Dockerfile.mte` is maintained directly so there is one source of truth. It
+pins both its Dockerfile frontend and Node base image by digest, resolves the
+complete pnpm workspace graph, and deploys only the server's production
+dependency closure. A build-time verifier rejects missing workspace runtime
+dependencies and broken links. It inspects every transitive manifest and file,
+removes all package bins and shims, and rejects executable content outside the
+single explicit `@embedded-postgres/linux-x64` server-runtime exemption. Agent
+harness and ACP platform packages receive no name-based exemption.
 
 ## Maintenance cost and removal
 
-The fork owns one additional Dockerfile and must periodically refresh its
-digest-pinned base and keep build steps aligned with upstream. Remove the
-custom image by deleting `Dockerfile.mte`, this patch directory, and the MTE
-image workflow after upstream offers a digest-pinned, harness-free image mode.
+The fork owns one additional Dockerfile, two small runtime verification scripts,
+and separate read-only build and digest-only publish workflows. It must
+periodically refresh pinned digests and action SHAs. Remove these files after
+upstream offers a digest-pinned, harness-free production closure.

@@ -465,7 +465,15 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     const [stillBoundReview] = await db.select().from(issues).where(eq(issues.id, watchdogIssueId));
     expect(stillBoundReview?.originFingerprint).toBe(oldFingerprint);
 
-    await db.update(heartbeatRuns).set({ status: "succeeded" }).where(eq(heartbeatRuns.id, watchdogRunId));
+    await finalizeTerminalRun(db, {
+      runId: watchdogRunId,
+      expectedStatus: "running",
+      status: "succeeded",
+      runPatch: { finishedAt: new Date() },
+      wakeupRequestId: null,
+      wakeupStatus: "completed",
+      wakeupError: null,
+    });
     await db.update(issues).set({ status: "done", updatedAt: new Date() }).where(eq(issues.id, watchdogIssueId));
     const afterOldReviewCompletes = await service.reconcileTaskWatchdogs({ companyId });
 
@@ -664,3 +672,5 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     expect(watchdogIssues).toHaveLength(1);
   });
 });
+
+import { finalizeTerminalRun } from "../services/terminal-run-finalizer.ts";

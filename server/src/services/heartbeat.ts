@@ -231,6 +231,13 @@ import {
   type EffectiveRunConfigSecretManifestEntry,
 } from "./effective-run-config-fingerprints.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
+import {
+  finalizeTerminalRun,
+  type TerminalRunFinalizerInput,
+} from "./terminal-run-finalizer.js";
+
+type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
+type DbOrTransaction = Db | DbTransaction;
 
 const MAX_LIVE_LOG_CHUNK_BYTES = 8 * 1024;
 const MAX_PERSISTED_LOG_CHUNK_CHARS = 64 * 1024;
@@ -4968,7 +4975,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     cancelWorkForScope: cancelBudgetScopeWork,
   };
   const budgets = budgetService(db, budgetHooks);
-  const recovery = recoveryService(db, { enqueueWakeup });
+  const recovery = recoveryService(db, { enqueueWakeup, releaseEnvironmentLeasesForRun });
   const productivityReviews = productivityReviewService(db, { enqueueWakeup });
   const taskWatchdogs = taskWatchdogService(db, { enqueueWakeup });
   let unsafeTextProjectionPromise: Promise<boolean> | null = null;
@@ -4986,14 +4993,17 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       agentId: input.agentId,
       status: leaseReleaseStatusForRunStatus(input.status),
       failureReason: input.failureReason ?? undefined,
-    }).catch((err) => {
-      logger.warn({ err, runId: input.runId }, "failed to release environment leases for heartbeat run");
-      return null;
     });
-    for (const releaseError of releaseResult?.errors ?? []) {
+    for (const releaseError of releaseResult.errors) {
       logger.warn(
         { err: releaseError.error, leaseId: releaseError.leaseId, runId: input.runId },
         "failed to release environment lease for heartbeat run",
+      );
+    }
+    if (releaseResult.errors.length > 0) {
+      throw new AggregateError(
+        releaseResult.errors.map((entry) => entry.error),
+        `Failed to release ${releaseResult.errors.length} environment lease(s) for run ${input.runId}`,
       );
     }
   }
@@ -6542,57 +6552,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     };
   }
 
-  async function upsertTaskSession(input: {
-    companyId: string;
-    agentId: string;
-    adapterType: string;
-    taskKey: string;
-    sessionParamsJson: Record<string, unknown> | null;
-    sessionDisplayId: string | null;
-    lastRunId: string | null;
-    lastError: string | null;
-  }) {
-    const existing = await getTaskSession(
-      input.companyId,
-      input.agentId,
-      input.adapterType,
-      input.taskKey,
-    );
-    if (existing) {
-      return db
-        .update(agentTaskSessions)
-        .set({
-          sessionParamsJson: input.sessionParamsJson,
-          sessionDisplayId: input.sessionDisplayId,
-          lastRunId: input.lastRunId,
-          lastError: input.lastError,
-          updatedAt: new Date(),
-        })
-        .where(eq(agentTaskSessions.id, existing.id))
-        .returning()
-        .then((rows) => rows[0] ?? null);
-    }
-
-    return db
-      .insert(agentTaskSessions)
-      .values({
-        companyId: input.companyId,
-        agentId: input.agentId,
-        adapterType: input.adapterType,
-        taskKey: input.taskKey,
-        sessionParamsJson: input.sessionParamsJson,
-        sessionDisplayId: input.sessionDisplayId,
-        lastRunId: input.lastRunId,
-        lastError: input.lastError,
-      })
-      .returning()
-      .then((rows) => rows[0] ?? null);
-  }
-
   async function clearTaskSessions(
     companyId: string,
     agentId: string,
     opts?: { taskKey?: string | null; adapterType?: string | null },
+    executor: DbOrTransaction = db,
   ) {
     const conditions = [
       eq(agentTaskSessions.companyId, companyId),
@@ -6605,7 +6569,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       conditions.push(eq(agentTaskSessions.adapterType, opts.adapterType));
     }
 
-    return db
+    return executor
       .delete(agentTaskSessions)
       .where(and(...conditions))
       .returning()
@@ -6638,56 +6602,23 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return ensured;
   }
 
-  async function setRunStatus(
+  async function patchRunLivenessReason(
     runId: string,
-    status: string,
-    patch?: Partial<typeof heartbeatRuns.$inferInsert>,
+    livenessReason: string,
   ) {
     const updated = await db
       .update(heartbeatRuns)
-      .set({ status, ...patch, updatedAt: new Date() })
+      .set({ livenessReason, updatedAt: new Date() })
       .where(eq(heartbeatRuns.id, runId))
       .returning()
       .then((rows) => rows[0] ?? null);
 
-    if (updated) {
-      if (isHeartbeatRunTerminalStatus(updated.status)) {
-        clearHeartbeatRunRuntimeStatus(updated.id);
-      }
-      publishLiveEvent({
-        companyId: updated.companyId,
-        type: "heartbeat.run.status",
-        payload: {
-          runId: updated.id,
-          agentId: updated.agentId,
-          status: updated.status,
-          invocationSource: updated.invocationSource,
-          triggerDetail: updated.triggerDetail,
-          error: updated.error ?? null,
-          errorCode: updated.errorCode ?? null,
-          startedAt: updated.startedAt ? new Date(updated.startedAt).toISOString() : null,
-          finishedAt: updated.finishedAt ? new Date(updated.finishedAt).toISOString() : null,
-        },
-      });
-      publishRunLifecyclePluginEvent(updated);
-    }
+    if (updated) publishRunStatus(updated);
 
     return updated;
   }
 
-  async function setRunStatusIfRunning(
-    runId: string,
-    status: string,
-    patch?: Partial<typeof heartbeatRuns.$inferInsert>,
-  ) {
-    const updated = await db
-      .update(heartbeatRuns)
-      .set({ status, ...patch, updatedAt: new Date() })
-      .where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.status, "running")))
-      .returning()
-      .then((rows) => rows[0] ?? null);
-
-    if (updated) {
+  function publishRunStatus(updated: typeof heartbeatRuns.$inferSelect) {
       if (isHeartbeatRunTerminalStatus(updated.status)) {
         clearHeartbeatRunRuntimeStatus(updated.id);
       }
@@ -6707,16 +6638,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         },
       });
       publishRunLifecyclePluginEvent(updated);
-      return { run: updated, updated: true as const };
-    }
+  }
 
-    const current = await db
-      .select()
-      .from(heartbeatRuns)
-      .where(eq(heartbeatRuns.id, runId))
-      .then((rows) => rows[0] ?? null);
-
-    return { run: current, updated: false as const };
+  async function finalizeRunTerminalIfStatus(
+    input: TerminalRunFinalizerInput,
+    executor: DbOrTransaction = db,
+  ) {
+    const result = await finalizeTerminalRun(db, input, executor);
+    if (executor === db && result.updated) publishRunStatus(result.run);
+    return result;
   }
 
   function publishRunLifecyclePluginEvent(run: typeof heartbeatRuns.$inferSelect) {
@@ -6842,10 +6772,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         agentId: run.agentId,
       });
       if (productivityHold.held) {
-        await setRunStatus(run.id, run.status, {
-          livenessReason:
-            `${run.livenessReason ?? "Run ended without concrete progress"}; continuation held by productivity review ${productivityHold.reviewIdentifier ?? productivityHold.reviewIssueId}`,
-        });
+        await patchRunLivenessReason(
+          run.id,
+          `${run.livenessReason ?? "Run ended without concrete progress"}; continuation held by productivity review ${productivityHold.reviewIdentifier ?? productivityHold.reviewIssueId}`,
+        );
         await productivityReviews.recordContinuationHold({
           companyId: issue.companyId,
           issueId: issue.id,
@@ -6887,9 +6817,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     });
 
     if (decision.kind === "exhausted") {
-      await setRunStatus(run.id, run.status, {
-        livenessReason: `${run.livenessReason ?? "Run ended without concrete progress"}; continuation attempts exhausted`,
-      });
+      await patchRunLivenessReason(
+        run.id,
+        `${run.livenessReason ?? "Run ended without concrete progress"}; continuation attempts exhausted`,
+      );
       await addContinuationExhaustedCommentOnce({
         run,
         issueId,
@@ -7354,7 +7285,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   ) {
     return db
       .update(heartbeatRuns)
-      .set({ ...patch, updatedAt: new Date() })
+      .set({
+        issueCommentStatus: patch.issueCommentStatus,
+        issueCommentSatisfiedByCommentId: patch.issueCommentSatisfiedByCommentId,
+        issueCommentRetryQueuedAt: patch.issueCommentRetryQueuedAt,
+        updatedAt: new Date(),
+      })
       .where(eq(heartbeatRuns.id, runId))
       .returning()
       .then((rows) => rows[0] ?? null);
@@ -7983,71 +7919,41 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     gate: Extract<ScheduledRetryGate, { allowed: false }>,
     now: Date,
   ) {
-    const cancelled = await db
-      .update(heartbeatRuns)
-      .set({
-        status: "cancelled",
+    await releaseEnvironmentLeasesForRun({
+      runId: run.id,
+      companyId: run.companyId,
+      agentId: run.agentId,
+      status: "cancelled",
+      failureReason: gate.reason,
+    });
+    const write = await finalizeRunTerminalIfStatus({
+      runId: run.id,
+      expectedStatus: "scheduled_retry",
+      scheduledRetryDueAt: now,
+      status: "cancelled",
+      runPatch: {
         finishedAt: now,
         error: gate.reason,
         errorCode: gate.errorCode,
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(heartbeatRuns.id, run.id),
-          eq(heartbeatRuns.status, "scheduled_retry"),
-          lte(heartbeatRuns.scheduledRetryAt, now),
-        ),
-      )
-      .returning()
-      .then((rows) => rows[0] ?? null);
-
-    if (!cancelled) return null;
-
-    if (cancelled.wakeupRequestId) {
-      await db
-        .update(agentWakeupRequests)
-        .set({
-          status: "cancelled",
-          finishedAt: now,
-          error: gate.reason,
-          updatedAt: now,
-        })
-        .where(eq(agentWakeupRequests.id, cancelled.wakeupRequestId));
-    }
-
-    if (gate.issueId) {
-      await db
-        .update(issues)
-        .set({
-          executionRunId: null,
-          executionAgentNameKey: null,
-          executionLockedAt: null,
-          updatedAt: now,
-        })
-        .where(
-          and(
-            eq(issues.companyId, cancelled.companyId),
-            eq(issues.id, gate.issueId),
-            eq(issues.executionRunId, cancelled.id),
-          ),
-        );
-    }
-
-    await appendRunEvent(cancelled, await nextRunEventSeq(cancelled.id), {
-      eventType: "lifecycle",
-      stream: "system",
-      level: "warn",
-      message: gate.reason,
-      payload: {
-        ...gate.details,
-        scheduledRetryAttempt: cancelled.scheduledRetryAttempt,
-        scheduledRetryAt: cancelled.scheduledRetryAt ? new Date(cancelled.scheduledRetryAt).toISOString() : null,
-        scheduledRetryReason: cancelled.scheduledRetryReason,
+      },
+      wakeupRequestId: run.wakeupRequestId,
+      wakeupStatus: "cancelled",
+      wakeupError: gate.reason,
+      issueUnlock: gate.issueId ? { companyId: run.companyId, issueId: gate.issueId } : null,
+      runEvent: {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "warn",
+        message: gate.reason,
+        payload: {
+          ...gate.details,
+          scheduledRetryAttempt: run.scheduledRetryAttempt,
+          scheduledRetryAt: run.scheduledRetryAt ? new Date(run.scheduledRetryAt).toISOString() : null,
+          scheduledRetryReason: run.scheduledRetryReason,
+        },
       },
     });
-
-    return cancelled;
+    return write.updated ? write.run : null;
   }
 
   async function promoteScheduledRetryRun(
@@ -8902,27 +8808,38 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   ) {
     const now = new Date();
     const reason = "Cancelled because the agent reached a per-day heartbeat budget cap before adapter invocation";
-    const cancelled = await setRunStatus(run.id, "cancelled", {
-      finishedAt: now,
-      error: reason,
-      errorCode: dailyCapBlock.reason,
-      resultJson: {
-        ...parseObject(run.resultJson),
-        stopReason: dailyCapBlock.reason,
-        observed: dailyCapBlock.observed,
-        limit: dailyCapBlock.limit,
-        effectiveTimeoutSec: 0,
-        timeoutConfigured: false,
-        timeoutSource: "heartbeat_daily_cap_gate",
-        timeoutFired: false,
+    await releaseEnvironmentLeasesForRun({
+      runId: run.id,
+      companyId: run.companyId,
+      agentId: run.agentId,
+      status: "cancelled",
+      failureReason: reason,
+    });
+    const cancelledWrite = await finalizeRunTerminalIfStatus({
+      runId: run.id,
+      expectedStatus: "queued",
+      status: "cancelled",
+      runPatch: {
+        finishedAt: now,
+        error: reason,
+        errorCode: dailyCapBlock.reason,
+        resultJson: {
+          ...parseObject(run.resultJson),
+          stopReason: dailyCapBlock.reason,
+          observed: dailyCapBlock.observed,
+          limit: dailyCapBlock.limit,
+          effectiveTimeoutSec: 0,
+          timeoutConfigured: false,
+          timeoutSource: "heartbeat_daily_cap_gate",
+          timeoutFired: false,
+        },
       },
+      wakeupRequestId: run.wakeupRequestId,
+      wakeupStatus: "skipped",
+      wakeupError: reason,
     });
-    if (!cancelled) return null;
-
-    await setWakeupStatus(run.wakeupRequestId, "skipped", {
-      finishedAt: now,
-      error: reason,
-    });
+    if (!cancelledWrite.updated || !cancelledWrite.run) return null;
+    const cancelled = cancelledWrite.run;
 
     await appendRunEvent(cancelled, await nextRunEventSeq(cancelled.id), {
       eventType: "lifecycle",
@@ -9187,25 +9104,36 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const now = new Date();
     const reason =
       "Cancelled because issue dependencies are still blocked; Paperclip will wake the assignee when blockers resolve";
-    const cancelled = await setRunStatus(run.id, "cancelled", {
-      finishedAt: now,
-      error: reason,
-      errorCode: "issue_dependencies_blocked",
-      resultJson: {
-        ...parseObject(run.resultJson),
-        stopReason: "issue_dependencies_blocked",
-        effectiveTimeoutSec: 0,
-        timeoutConfigured: false,
-        timeoutSource: "dependency_gate",
-        timeoutFired: false,
+    await releaseEnvironmentLeasesForRun({
+      runId: run.id,
+      companyId: run.companyId,
+      agentId: run.agentId,
+      status: "cancelled",
+      failureReason: reason,
+    });
+    const cancelledWrite = await finalizeRunTerminalIfStatus({
+      runId: run.id,
+      expectedStatus: "queued",
+      status: "cancelled",
+      runPatch: {
+        finishedAt: now,
+        error: reason,
+        errorCode: "issue_dependencies_blocked",
+        resultJson: {
+          ...parseObject(run.resultJson),
+          stopReason: "issue_dependencies_blocked",
+          effectiveTimeoutSec: 0,
+          timeoutConfigured: false,
+          timeoutSource: "dependency_gate",
+          timeoutFired: false,
+        },
       },
+      wakeupRequestId: run.wakeupRequestId,
+      wakeupStatus: "skipped",
+      wakeupError: reason,
     });
-    if (!cancelled) return null;
-
-    await setWakeupStatus(run.wakeupRequestId, "skipped", {
-      finishedAt: now,
-      error: reason,
-    });
+    if (!cancelledWrite.updated || !cancelledWrite.run) return null;
+    const cancelled = cancelledWrite.run;
 
     await db
       .update(issues)
@@ -9393,25 +9321,36 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     staleness: Extract<QueuedRunStaleness, { stale: true }>,
   ) {
     const now = new Date();
-    const cancelled = await setRunStatus(run.id, "cancelled", {
-      finishedAt: now,
-      error: staleness.reason,
-      errorCode: staleness.errorCode,
-      resultJson: {
-        ...parseObject(run.resultJson),
-        stopReason: staleness.errorCode,
-        effectiveTimeoutSec: 0,
-        timeoutConfigured: false,
-        timeoutSource: "stale_queued_run_gate",
-        timeoutFired: false,
+    await releaseEnvironmentLeasesForRun({
+      runId: run.id,
+      companyId: run.companyId,
+      agentId: run.agentId,
+      status: "cancelled",
+      failureReason: staleness.reason,
+    });
+    const cancelledWrite = await finalizeRunTerminalIfStatus({
+      runId: run.id,
+      expectedStatus: "queued",
+      status: "cancelled",
+      runPatch: {
+        finishedAt: now,
+        error: staleness.reason,
+        errorCode: staleness.errorCode,
+        resultJson: {
+          ...parseObject(run.resultJson),
+          stopReason: staleness.errorCode,
+          effectiveTimeoutSec: 0,
+          timeoutConfigured: false,
+          timeoutSource: "stale_queued_run_gate",
+          timeoutFired: false,
+        },
       },
+      wakeupRequestId: run.wakeupRequestId,
+      wakeupStatus: "skipped",
+      wakeupError: staleness.reason,
     });
-    if (!cancelled) return null;
-
-    await setWakeupStatus(run.wakeupRequestId, "skipped", {
-      finishedAt: now,
-      error: staleness.reason,
-    });
+    if (!cancelledWrite.updated || !cancelledWrite.run) return null;
+    const cancelled = cancelledWrite.run;
 
     await db
       .update(issues)
@@ -9754,10 +9693,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       if (processPidAlive) {
         if (run.errorCode !== DETACHED_PROCESS_ERROR_CODE) {
           const detachedMessage = `Lost in-memory process handle, but child pid ${run.processPid} is still alive`;
-          const detachedRun = await setRunStatus(run.id, "running", {
-            error: detachedMessage,
-            errorCode: DETACHED_PROCESS_ERROR_CODE,
-          });
+          const detachedRun = await db
+            .update(heartbeatRuns)
+            .set({
+              error: detachedMessage,
+              errorCode: DETACHED_PROCESS_ERROR_CODE,
+              updatedAt: new Date(),
+            })
+            .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "running")))
+            .returning()
+            .then((rows) => rows[0] ?? null);
           if (detachedRun) {
             await appendRunEvent(detachedRun, await nextRunEventSeq(detachedRun.id), {
               eventType: "lifecycle",
@@ -9785,35 +9730,54 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const shouldRetry = tracksLocalChild && (!!run.processPid || !!run.processGroupId) && (run.processLossRetryCount ?? 0) < 1;
       const baseMessage = buildProcessLossMessage(run, descendantOnlyCleanup ? { descendantOnly: true } : undefined);
 
-      let finalizedRun = await setRunStatus(run.id, "failed", {
-        error: shouldRetry ? `${baseMessage}; retrying once` : baseMessage,
-        errorCode: "process_lost",
-        finishedAt: now,
-        resultJson: mergeRunStopMetadataForAgent(
-          { adapterType, adapterConfig },
-          "failed",
-          {
-            resultJson: parseObject(run.resultJson),
-            errorCode: "process_lost",
-            errorMessage: shouldRetry ? `${baseMessage}; retrying once` : baseMessage,
-          },
-        ),
+      try {
+        await releaseEnvironmentLeasesForRun({
+          runId: run.id,
+          companyId: run.companyId,
+          agentId: run.agentId,
+          status: "failed",
+          failureReason: baseMessage,
+        });
+      } catch (releaseError) {
+        logger.error(
+          { err: releaseError, runId: run.id },
+          "orphaned run remains active because its environment lease could not be released",
+        );
+        continue;
+      }
+
+      const finalizedWrite = await finalizeRunTerminalIfStatus({
+        runId: run.id,
+        expectedStatus: "running",
+        status: "failed",
+        runPatch: {
+          error: shouldRetry ? `${baseMessage}; retrying once` : baseMessage,
+          errorCode: "process_lost",
+          finishedAt: now,
+          resultJson: mergeRunStopMetadataForAgent(
+            { adapterType, adapterConfig },
+            "failed",
+            {
+              resultJson: parseObject(run.resultJson),
+              errorCode: "process_lost",
+              errorMessage: shouldRetry ? `${baseMessage}; retrying once` : baseMessage,
+            },
+          ),
+        },
+        wakeupRequestId: run.wakeupRequestId,
+        wakeupStatus: "failed",
+        wakeupError: shouldRetry ? `${baseMessage}; retrying once` : baseMessage,
       });
-      await setWakeupStatus(run.wakeupRequestId, "failed", {
-        finishedAt: now,
-        error: shouldRetry ? `${baseMessage}; retrying once` : baseMessage,
-      });
-      if (!finalizedRun) finalizedRun = await getRun(run.id);
+      if (!finalizedWrite.updated) {
+        logger.info(
+          { runId: run.id, currentStatus: finalizedWrite.run?.status ?? null },
+          "skipping orphan recovery side effects because another terminal path won",
+        );
+        continue;
+      }
+      let finalizedRun = finalizedWrite.run;
       if (!finalizedRun) continue;
       finalizedRun = await classifyAndPersistRunLiveness(finalizedRun, parseObject(finalizedRun.resultJson)) ?? finalizedRun;
-      await releaseEnvironmentLeasesForRun({
-        runId: finalizedRun.id,
-        companyId: finalizedRun.companyId,
-        agentId: finalizedRun.agentId,
-        status: finalizedRun.status,
-        failureReason: finalizedRun.error ?? undefined,
-      });
-
       let retriedRun: typeof heartbeatRuns.$inferSelect | null = null;
       if (shouldRetry) {
         const agent = await getAgent(run.agentId);
@@ -10076,21 +10040,35 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
 
     activeRunExecutions.add(run.id);
+    let terminalTransitionOwned = false;
 
     try {
     const agent = await getAgent(run.agentId);
     if (!agent) {
-      await setRunStatus(runId, "failed", {
-        error: "Agent not found",
-        errorCode: "agent_not_found",
-        finishedAt: new Date(),
+      const reason = "Agent not found";
+      await releaseEnvironmentLeasesForRun({
+        runId: run.id,
+        companyId: run.companyId,
+        agentId: run.agentId,
+        status: "failed",
+        failureReason: reason,
       });
-      await setWakeupStatus(run.wakeupRequestId, "failed", {
-        finishedAt: new Date(),
-        error: "Agent not found",
+      const failedWrite = await finalizeRunTerminalIfStatus({
+        runId,
+        expectedStatus: "running",
+        status: "failed",
+        runPatch: {
+          error: reason,
+          errorCode: "agent_not_found",
+          finishedAt: new Date(),
+        },
+        wakeupRequestId: run.wakeupRequestId,
+        wakeupStatus: "failed",
+        wakeupError: reason,
       });
-      const failedRun = await getRun(runId);
-      if (failedRun) await releaseIssueExecutionAndPromote(failedRun);
+      if (!failedWrite.updated) return;
+      terminalTransitionOwned = true;
+      if (failedWrite.run) await releaseIssueExecutionAndPromote(failedWrite.run);
       return;
     }
 
@@ -11315,23 +11293,41 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           "execution-start aborted: agent not invokable",
         );
         const abortReason = "Cancelled: agent not invokable at execution-start";
-        await setRunStatus(run.id, "cancelled", {
-          finishedAt: new Date(),
-          error: abortReason,
-          errorCode: "agent_not_invokable",
-          ...(agent ? {
-            resultJson: mergeRunStopMetadataForAgent(agent, "cancelled", {
-              resultJson: parseObject(run.resultJson),
-              errorCode: "agent_not_invokable",
-              errorMessage: abortReason,
-            }),
-          } : {}),
+        // Environment/workspace resolution happens before this final invokability
+        // gate and may already have acquired a provider lease. Keep cancellation,
+        // wakeup disposition, and issue promotion invisible until that lease is
+        // confirmed released; a provider error is handled by the outer fail-closed
+        // setup path and leaves the run non-terminal.
+        await releaseEnvironmentLeasesForRun({
+          runId: run.id,
+          companyId: run.companyId,
+          agentId: run.agentId,
+          status: "cancelled",
+          failureReason: abortReason,
         });
-        await setWakeupStatus(run.wakeupRequestId, "cancelled", {
-          finishedAt: new Date(),
-          error: abortReason,
+        const cancelledWrite = await finalizeRunTerminalIfStatus({
+          runId: run.id,
+          expectedStatus: "running",
+          status: "cancelled",
+          runPatch: {
+            finishedAt: new Date(),
+            error: abortReason,
+            errorCode: "agent_not_invokable",
+            ...(agent ? {
+              resultJson: mergeRunStopMetadataForAgent(agent, "cancelled", {
+                resultJson: parseObject(run.resultJson),
+                errorCode: "agent_not_invokable",
+                errorMessage: abortReason,
+              }),
+            } : {}),
+          },
+          wakeupRequestId: run.wakeupRequestId,
+          wakeupStatus: "cancelled",
+          wakeupError: abortReason,
         });
-        await releaseIssueExecutionAndPromote(run);
+        if (!cancelledWrite.updated) return;
+        terminalTransitionOwned = true;
+        if (cancelledWrite.run) await releaseIssueExecutionAndPromote(cancelledWrite.run);
         return;
       }
 
@@ -11951,20 +11947,65 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         adapterResult.summary ?? null,
       );
 
-      const persistedRunWrite = await setRunStatusIfRunning(run.id, status, {
-        finishedAt: new Date(),
-        error: runErrorMessage,
-        errorCode: runErrorCode,
-        exitCode: adapterResult.exitCode,
-        signal: adapterResult.signal,
-        usageJson,
-        resultJson: persistedResultJson,
-        sessionIdAfter: nextSessionState.displayId ?? nextSessionState.legacySessionId,
-        stdoutExcerpt,
-        stderrExcerpt,
-        logBytes: logSummary?.bytes,
-        logSha256: logSummary?.sha256,
-        logCompressed: logSummary?.compressed ?? false,
+      // A scheduler must never observe completion while its remote lease is
+      // still live. Release is a fail-closed prerequisite for terminal state.
+      await releaseEnvironmentLeasesForRun({
+        runId: run.id,
+        companyId: run.companyId,
+        agentId: run.agentId,
+        status,
+        failureReason: runErrorMessage,
+      });
+
+      const taskSessionMutation = !taskKey
+        ? { kind: "none" as const }
+        : adapterResult.clearSession || (!nextSessionState.params && !nextSessionState.displayId)
+          ? {
+              kind: "clear" as const,
+              companyId: agent.companyId,
+              agentId: agent.id,
+              adapterType: agent.adapterType,
+              taskKey,
+            }
+          : {
+              kind: "upsert" as const,
+              companyId: agent.companyId,
+              agentId: agent.id,
+              adapterType: agent.adapterType,
+              taskKey,
+              sessionParamsJson: attachPaperclipSessionMetadataToSessionParams(
+                nextSessionState.params,
+                configuredModel,
+                sessionConfigMetadata,
+              ),
+              sessionDisplayId: nextSessionState.displayId,
+              lastRunId: run.id,
+              lastError: outcome === "succeeded" ? null : (adapterResult.errorMessage ?? "run_failed"),
+            };
+
+      const persistedRunWrite = await finalizeRunTerminalIfStatus({
+        runId: run.id,
+        expectedStatus: "running",
+        status,
+        runPatch: {
+          finishedAt: new Date(),
+          error: runErrorMessage,
+          errorCode: runErrorCode,
+          exitCode: adapterResult.exitCode,
+          signal: adapterResult.signal,
+          usageJson,
+          resultJson: persistedResultJson,
+          sessionIdAfter: nextSessionState.displayId ?? nextSessionState.legacySessionId,
+          stdoutExcerpt,
+          stderrExcerpt,
+          logBytes: logSummary?.bytes,
+          logSha256: logSummary?.sha256,
+          logCompressed: logSummary?.compressed ?? false,
+        },
+        wakeupRequestId: run.wakeupRequestId,
+        wakeupStatus: outcome === "succeeded" ? "completed" : status,
+        wakeupError: runErrorMessage,
+        taskSession: taskSessionMutation,
       });
       if (!persistedRunWrite.updated) {
         logger.info(
@@ -11977,54 +12018,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         );
         return;
       }
+      terminalTransitionOwned = true;
 
       let persistedRun = persistedRunWrite.run;
       if (persistedRun) {
         persistedRun = await classifyAndPersistRunLiveness(persistedRun, persistedResultJson) ?? persistedRun;
       }
 
-      await setWakeupStatus(run.wakeupRequestId, outcome === "succeeded" ? "completed" : status, {
-        finishedAt: new Date(),
-        error: runErrorMessage,
-      });
-
       const finalizedRun = persistedRun ?? (await getRun(run.id));
       if (finalizedRun) {
         await updateRuntimeState(agent, finalizedRun, adapterResult, {
           legacySessionId: nextSessionState.legacySessionId,
         }, normalizedUsage);
-        if (taskKey) {
-          if (adapterResult.clearSession || (!nextSessionState.params && !nextSessionState.displayId)) {
-            await clearTaskSessions(agent.companyId, agent.id, {
-              taskKey,
-              adapterType: agent.adapterType,
-            });
-          } else {
-            await upsertTaskSession({
-              companyId: agent.companyId,
-              agentId: agent.id,
-              adapterType: agent.adapterType,
-              taskKey,
-              sessionParamsJson: attachPaperclipSessionMetadataToSessionParams(
-                nextSessionState.params,
-                configuredModel,
-                sessionConfigMetadata,
-              ),
-              sessionDisplayId: nextSessionState.displayId,
-              lastRunId: finalizedRun.id,
-              lastError: outcome === "succeeded" ? null : (adapterResult.errorMessage ?? "run_failed"),
-            });
-          }
-        }
-      }
-      if (finalizedRun) {
-        await releaseEnvironmentLeasesForRun({
-          runId: finalizedRun.id,
-          companyId: finalizedRun.companyId,
-          agentId: finalizedRun.agentId,
-          status: finalizedRun.status,
-          failureReason: finalizedRun.error ?? undefined,
-        });
         await appendRunEvent(finalizedRun, seq++, {
           eventType: "lifecycle",
           stream: "system",
@@ -12210,20 +12215,60 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         logger.warn({ err: flushErr, runId }, "failed to flush run output progress after error");
       });
 
-      const failedRunWrite = await setRunStatusIfRunning(run.id, "failed", {
-        error: message,
-        errorCode: failureErrorCode,
-        finishedAt: new Date(),
-        resultJson: mergeRunStopMetadataForAgent(agent, "failed", {
+      try {
+        await releaseEnvironmentLeasesForRun({
+          runId: run.id,
+          companyId: run.companyId,
+          agentId: run.agentId,
+          status: "failed",
+          failureReason: message,
+        });
+      } catch (releaseError) {
+        logger.error({ err: releaseError, runId }, "terminal transition blocked by environment lease release failure");
+        return;
+      }
+
+      const failedTaskSessionMutation = taskKey && (previousSessionParams || previousSessionDisplayId || taskSession)
+        ? {
+            kind: "upsert" as const,
+            companyId: agent.companyId,
+            agentId: agent.id,
+            adapterType: agent.adapterType,
+            taskKey,
+            sessionParamsJson: attachPaperclipSessionMetadataToSessionParams(
+              previousSessionParams,
+              configuredModel,
+              sessionConfigMetadata,
+            ),
+            sessionDisplayId: previousSessionDisplayId,
+            lastRunId: run.id,
+            lastError: message,
+          }
+        : { kind: "none" as const };
+
+      const failedRunWrite = await finalizeRunTerminalIfStatus({
+        runId: run.id,
+        expectedStatus: "running",
+        status: "failed",
+        runPatch: {
+          error: message,
           errorCode: failureErrorCode,
-          errorMessage: message,
-          resultJson: workspaceValidationFailure?.resultJson ?? configurationIncompleteFailure?.resultJson ?? null,
-        }),
-        stdoutExcerpt,
-        stderrExcerpt,
-        logBytes: logSummary?.bytes,
-        logSha256: logSummary?.sha256,
-        logCompressed: logSummary?.compressed ?? false,
+          finishedAt: new Date(),
+          resultJson: mergeRunStopMetadataForAgent(agent, "failed", {
+            errorCode: failureErrorCode,
+            errorMessage: message,
+            resultJson: workspaceValidationFailure?.resultJson ?? configurationIncompleteFailure?.resultJson ?? null,
+          }),
+          stdoutExcerpt,
+          stderrExcerpt,
+          logBytes: logSummary?.bytes,
+          logSha256: logSummary?.sha256,
+          logCompressed: logSummary?.compressed ?? false,
+        },
+        wakeupRequestId: run.wakeupRequestId,
+        wakeupStatus: "failed",
+        wakeupError: message,
+        taskSession: failedTaskSessionMutation,
       });
       if (!failedRunWrite.updated) {
         logger.info(
@@ -12236,13 +12281,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         );
         return;
       }
+      terminalTransitionOwned = true;
 
       const failedRun = failedRunWrite.run;
-      await setWakeupStatus(run.wakeupRequestId, "failed", {
-        finishedAt: new Date(),
-        error: message,
-      });
-
       if (failedRun) {
         await appendRunEvent(failedRun, seq++, {
           eventType: "error",
@@ -12266,22 +12307,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           legacySessionId: runtimeForAdapter.sessionId,
         });
 
-        if (taskKey && (previousSessionParams || previousSessionDisplayId || taskSession)) {
-          await upsertTaskSession({
-            companyId: agent.companyId,
-            agentId: agent.id,
-            adapterType: agent.adapterType,
-            taskKey,
-            sessionParamsJson: attachPaperclipSessionMetadataToSessionParams(
-              previousSessionParams,
-              configuredModel,
-              sessionConfigMetadata,
-            ),
-            sessionDisplayId: previousSessionDisplayId,
-            lastRunId: failedRun.id,
-            lastError: message,
-          });
-        }
       }
 
       await finalizeAgentStatus(agent.id, "failed", message);
@@ -12307,19 +12332,45 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             "setup_failed";
           logger.error({ err: outerErr, runId }, "heartbeat execution setup failed");
           const setupFailureAgent = await getAgent(run.agentId).catch(() => null);
-          const setupFailureWrite = await setRunStatusIfRunning(runId, "failed", {
-            error: message,
-            errorCode: setupFailureErrorCode,
-            finishedAt: new Date(),
-            ...(setupFailureAgent ? {
-              resultJson: mergeRunStopMetadataForAgent(setupFailureAgent, "failed", {
-                errorCode: setupFailureErrorCode,
-                errorMessage: message,
-                resultJson:
-                  workspaceValidationSetupFailure?.resultJson ?? configurationIncompleteSetupFailure?.resultJson ?? null,
-              }),
-            } : {}),
-          }).catch(() => ({ run: null, updated: false as const }));
+          let setupLeaseReleaseError: unknown = null;
+          try {
+            await releaseEnvironmentLeasesForRun({
+              runId,
+              companyId: run.companyId,
+              agentId: run.agentId,
+              status: "failed",
+              failureReason: message,
+            });
+          } catch (releaseError) {
+            setupLeaseReleaseError = releaseError;
+            logger.error(
+              { err: releaseError, runId },
+              "setup failure remains active because its environment lease could not be released",
+            );
+          }
+          const setupFailureWrite = setupLeaseReleaseError
+            ? { run: await getRun(runId), updated: false as const }
+            : await finalizeRunTerminalIfStatus({
+                runId,
+                expectedStatus: "running",
+                status: "failed",
+                runPatch: {
+                  error: message,
+                  errorCode: setupFailureErrorCode,
+                  finishedAt: new Date(),
+                  ...(setupFailureAgent ? {
+                    resultJson: mergeRunStopMetadataForAgent(setupFailureAgent, "failed", {
+                      errorCode: setupFailureErrorCode,
+                      errorMessage: message,
+                      resultJson:
+                        workspaceValidationSetupFailure?.resultJson ?? configurationIncompleteSetupFailure?.resultJson ?? null,
+                    }),
+                  } : {}),
+                },
+                wakeupRequestId: run.wakeupRequestId,
+                wakeupStatus: "failed",
+                wakeupError: message,
+              }).catch(() => ({ run: null, updated: false as const }));
           if (!setupFailureWrite.updated) {
             logger.info(
               {
@@ -12329,12 +12380,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               },
               "skipping late setup failure finalization because the run already left running state",
             );
-          } else {
-            await setWakeupStatus(run.wakeupRequestId, "failed", {
-              finishedAt: new Date(),
-              error: message,
-            }).catch(() => undefined);
-          }
+          } else terminalTransitionOwned = true;
           const failedRun = await getRun(runId).catch(() => null);
           if (setupFailureWrite.updated && failedRun) {
             // Emit a run-log event so the failure is visible in the run timeline,
@@ -12368,16 +12414,27 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           }
         } finally {
           const latestRun = await getRun(run.id).catch(() => null);
-          await releaseEnvironmentLeasesForRun({
-            runId: run.id,
-            companyId: run.companyId,
-            agentId: run.agentId,
-            status: latestRun?.status,
-            failureReason: latestRun?.error ?? undefined,
-          });
+          let environmentLeasesReleased = false;
+          try {
+            await releaseEnvironmentLeasesForRun({
+              runId: run.id,
+              companyId: run.companyId,
+              agentId: run.agentId,
+              status: latestRun?.status,
+              failureReason: latestRun?.error ?? undefined,
+            });
+            environmentLeasesReleased = true;
+          } catch (releaseError) {
+            logger.error(
+              { err: releaseError, runId: run.id },
+              "queued-run promotion blocked by environment lease release failure",
+            );
+          }
           await releaseRuntimeServicesForRun(run.id).catch(() => undefined);
           activeRunExecutions.delete(run.id);
-          await startNextQueuedRunForAgent(run.agentId);
+          if (environmentLeasesReleased && terminalTransitionOwned) {
+            await startNextQueuedRunForAgent(run.agentId);
+          }
         }
   }
 
@@ -13503,73 +13560,50 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           const reason = issueCancelled
             ? "Cancelled because the issue was cancelled before the scheduled retry became due"
             : "Cancelled because the issue was reassigned before the scheduled retry became due";
-          const cancelled = await tx
-            .update(heartbeatRuns)
-            .set({
-              status: "cancelled",
+          await releaseEnvironmentLeasesForRun({
+            runId: scheduledRun.id,
+            companyId: scheduledRun.companyId,
+            agentId: scheduledRun.agentId,
+            status: "cancelled",
+            failureReason: reason,
+          });
+          const cancelledWrite = await finalizeRunTerminalIfStatus({
+            runId: scheduledRun.id,
+            expectedStatus: "scheduled_retry",
+            status: "cancelled",
+            runPatch: {
               finishedAt: now,
               error: reason,
               errorCode: issueCancelled ? "issue_cancelled" : "issue_reassigned",
-              updatedAt: now,
-            })
-            .where(and(eq(heartbeatRuns.id, scheduledRun.id), eq(heartbeatRuns.status, "scheduled_retry")))
-            .returning()
-            .then((rows) => rows[0] ?? null);
-
-          if (!cancelled) return false;
-
-          if (scheduledRun.wakeupRequestId) {
-            await tx
-              .update(agentWakeupRequests)
-              .set({
-                status: "cancelled",
-                finishedAt: now,
-                error: reason,
-                updatedAt: now,
-              })
-              .where(eq(agentWakeupRequests.id, scheduledRun.wakeupRequestId));
-          }
-
-          if (issue.executionRunId === scheduledRun.id) {
-            await tx
-              .update(issues)
-              .set({
-                executionRunId: null,
-                executionAgentNameKey: null,
-                executionLockedAt: null,
-                updatedAt: now,
-              })
-              .where(and(eq(issues.id, issue.id), eq(issues.executionRunId, scheduledRun.id)));
-          }
-
-          const [eventSeq] = await tx
-            .select({ maxSeq: sql<number | null>`max(${heartbeatRunEvents.seq})` })
-            .from(heartbeatRunEvents)
-            .where(eq(heartbeatRunEvents.runId, cancelled.id));
-
-          await tx.insert(heartbeatRunEvents).values({
-            companyId: cancelled.companyId,
-            runId: cancelled.id,
-            agentId: cancelled.agentId,
-            seq: Number(eventSeq?.maxSeq ?? 0) + 1,
-            eventType: "lifecycle",
-            stream: "system",
-            level: "warn",
-            message: issueCancelled
-              ? "Scheduled retry cancelled because issue was cancelled before it became due"
-              : "Scheduled retry cancelled because issue ownership changed before it became due",
-            payload: {
-              issueId: issue.id,
-              issueStatus: issue.status,
-              scheduledRetryAttempt: cancelled.scheduledRetryAttempt,
-              scheduledRetryAt: cancelled.scheduledRetryAt ? new Date(cancelled.scheduledRetryAt).toISOString() : null,
-              scheduledRetryReason: cancelled.scheduledRetryReason,
-              previousRetryAgentId: cancelled.agentId,
-              currentAssigneeAgentId: issue.assigneeAgentId,
             },
-          });
+            wakeupRequestId: scheduledRun.wakeupRequestId,
+            wakeupStatus: "cancelled",
+            wakeupError: reason,
+            issueUnlock: issue.executionRunId === scheduledRun.id
+              ? { companyId: issue.companyId, issueId: issue.id }
+              : null,
+            runEvent: {
+              eventType: "lifecycle",
+              stream: "system",
+              level: "warn",
+              message: issueCancelled
+                ? "Scheduled retry cancelled because issue was cancelled before it became due"
+                : "Scheduled retry cancelled because issue ownership changed before it became due",
+              payload: {
+                issueId: issue.id,
+                issueStatus: issue.status,
+                scheduledRetryAttempt: scheduledRun.scheduledRetryAttempt,
+                scheduledRetryAt: scheduledRun.scheduledRetryAt
+                  ? new Date(scheduledRun.scheduledRetryAt).toISOString()
+                  : null,
+                scheduledRetryReason: scheduledRun.scheduledRetryReason,
+                previousRetryAgentId: scheduledRun.agentId,
+                currentAssigneeAgentId: issue.assigneeAgentId,
+              },
+            },
+          }, tx);
 
-          return true;
+          return cancelledWrite.updated;
         };
 
         let activeExecutionRun = issue.executionRunId
@@ -13614,34 +13648,29 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           issue.assigneeAgentId &&
           activeExecutionRun.agentId !== issue.assigneeAgentId
         ) {
-          const cancelled = await tx
-            .update(heartbeatRuns)
-            .set({
-              status: "cancelled",
+          const cancellationReason = "Execution lock released after issue reassigned to a different agent";
+          await releaseEnvironmentLeasesForRun({
+            runId: activeExecutionRun.id,
+            companyId: activeExecutionRun.companyId,
+            agentId: activeExecutionRun.agentId,
+            status: "cancelled",
+            failureReason: cancellationReason,
+          });
+          const cancelledWrite = await finalizeRunTerminalIfStatus({
+            runId: activeExecutionRun.id,
+            expectedStatus: activeExecutionRun.status,
+            status: "cancelled",
+            runPatch: {
               finishedAt: new Date(),
-              error: "Execution lock released after issue reassigned to a different agent",
+              error: cancellationReason,
               errorCode: "lock_released_on_reassignment",
-              updatedAt: new Date(),
-            })
-            .where(
-              and(
-                eq(heartbeatRuns.id, activeExecutionRun.id),
-                eq(heartbeatRuns.status, activeExecutionRun.status),
-              ),
-            )
-            .returning({ id: heartbeatRuns.id });
-          if (cancelled.length > 0) {
-            if (activeExecutionRun.wakeupRequestId) {
-              await tx
-                .update(agentWakeupRequests)
-                .set({
-                  status: "cancelled",
-                  finishedAt: new Date(),
-                  error: "Execution lock released after issue reassigned to a different agent",
-                  updatedAt: new Date(),
-                })
-                .where(eq(agentWakeupRequests.id, activeExecutionRun.wakeupRequestId));
-            }
+            },
+            wakeupRequestId: activeExecutionRun.wakeupRequestId,
+            wakeupStatus: "cancelled",
+            wakeupError: cancellationReason,
+            issueUnlock: { companyId: issue.companyId, issueId: issue.id },
+          }, tx);
+          if (cancelledWrite.updated) {
             activeExecutionRun = null;
           }
         }
@@ -14291,18 +14320,29 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
 
     const finishedAt = new Date();
-    const cancelled = await setRunStatus(run.id, "cancelled", {
-      finishedAt,
-      error: reason,
-      errorCode,
-      ...(resultJson ? { resultJson } : {}),
+    await releaseEnvironmentLeasesForRun({
+      runId: run.id,
+      companyId: run.companyId,
+      agentId: run.agentId,
+      status: "cancelled",
+      failureReason: reason,
     });
-
-    await setWakeupStatus(run.wakeupRequestId, "cancelled", {
-      finishedAt,
-      error: reason,
+    const cancelledWrite = await finalizeRunTerminalIfStatus({
+      runId: run.id,
+      expectedStatus: run.status,
+      status: "cancelled",
+      runPatch: {
+        finishedAt,
+        error: reason,
+        errorCode,
+        ...(resultJson ? { resultJson } : {}),
+      },
+      wakeupRequestId: run.wakeupRequestId,
+      wakeupStatus: "cancelled",
+      wakeupError: reason,
     });
-
+    if (!cancelledWrite.updated) return cancelledWrite.run;
+    const cancelled = cancelledWrite.run;
     if (cancelled) {
       await appendRunEvent(cancelled, 1, {
         eventType: "lifecycle",
@@ -14326,25 +14366,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .from(heartbeatRuns)
       .where(and(eq(heartbeatRuns.agentId, agentId), inArray(heartbeatRuns.status, [...CANCELLABLE_HEARTBEAT_RUN_STATUSES])));
 
+    let cancelledCount = 0;
     for (const run of runs) {
-      await setRunStatus(run.id, "cancelled", {
-        finishedAt: new Date(),
-        error: reason,
-        errorCode,
-        ...(agent ? {
-          resultJson: mergeRunStopMetadataForAgent(agent, "cancelled", {
-            resultJson: parseObject(run.resultJson),
-            errorCode,
-            errorMessage: reason,
-          }),
-        } : {}),
-      });
-
-      await setWakeupStatus(run.wakeupRequestId, "cancelled", {
-        finishedAt: new Date(),
-        error: reason,
-      });
-
       const running = runningProcesses.get(run.id);
       if (running) {
         await terminateHeartbeatRunProcess({
@@ -14359,10 +14382,40 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           processGroupId: run.processGroupId,
         });
       }
-      await releaseIssueExecutionAndPromote(run);
+      await releaseEnvironmentLeasesForRun({
+        runId: run.id,
+        companyId: run.companyId,
+        agentId: run.agentId,
+        status: "cancelled",
+        failureReason: reason,
+      });
+      const cancelledWrite = await finalizeRunTerminalIfStatus({
+        runId: run.id,
+        expectedStatus: run.status,
+        status: "cancelled",
+        runPatch: {
+          finishedAt: new Date(),
+          error: reason,
+          errorCode,
+          ...(agent ? {
+            resultJson: mergeRunStopMetadataForAgent(agent, "cancelled", {
+              resultJson: parseObject(run.resultJson),
+              errorCode,
+              errorMessage: reason,
+            }),
+          } : {}),
+        },
+        wakeupRequestId: run.wakeupRequestId,
+        wakeupStatus: "cancelled",
+        wakeupError: reason,
+      });
+      if (!cancelledWrite.updated) continue;
+      cancelledCount += 1;
+      const cancelled = cancelledWrite.run;
+      if (cancelled) await releaseIssueExecutionAndPromote(cancelled);
     }
 
-    return runs.length;
+    return cancelledCount;
   }
 
   async function cancelPendingWakeupsForAgentsInternal(agentIds: string[], reason: string) {

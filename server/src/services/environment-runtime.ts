@@ -1776,18 +1776,30 @@ export function environmentRuntimeService(
       const released: EnvironmentRuntimeLeaseRecord[] = [];
       for (const leaseRow of leaseRows) {
         const environment = await environmentsSvc.getById(leaseRow.environmentId);
-        if (!environment) continue;
+        if (!environment) {
+          throw new Error(
+            `Cannot release environment lease ${leaseRow.id}: environment ${leaseRow.environmentId} is missing.`,
+          );
+        }
 
         const leaseSnapshot = toEnvironmentLeaseSnapshot(leaseRow);
         const driver = getDriver(getLeaseDriverKey(leaseSnapshot, environment));
-        const lease = driver
-          ? await driver.releaseRunLease({
-              environment,
-              lease: leaseSnapshot,
-              status,
-            })
-          : await environmentsSvc.releaseLease(leaseRow.id, status);
-        if (!lease) continue;
+        if (!driver) {
+          throw new Error(
+            `Cannot release active lease ${leaseRow.id}: environment driver is not registered.`,
+          );
+        }
+        const lease = await driver.releaseRunLease({
+          environment,
+          lease: leaseSnapshot,
+          status,
+        });
+        if (!lease) {
+          throw new Error(`Environment driver did not release active lease ${leaseRow.id}.`);
+        }
+        if (lease.status === "active") {
+          throw new Error(`Environment driver returned active lease ${leaseRow.id} after release.`);
+        }
 
         released.push({
           environment,

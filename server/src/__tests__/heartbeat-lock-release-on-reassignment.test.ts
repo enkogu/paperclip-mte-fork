@@ -220,24 +220,21 @@ describeEmbeddedPostgres("heartbeat lock release on cross-agent reassignment", (
       .set({ status: "running", startedAt: new Date(), updatedAt: new Date() })
       .where(eq(heartbeatRuns.id, holderRunId));
 
-    const cancelled = await db
-      .update(heartbeatRuns)
-      .set({
-        status: "cancelled",
+    const cancelled = await finalizeTerminalRun(db, {
+      runId: holderRunId,
+      expectedStatus: snapshotStatus,
+      status: "cancelled",
+      runPatch: {
         finishedAt: new Date(),
         error: "Execution lock released after issue reassigned to a different agent",
         errorCode: "lock_released_on_reassignment",
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(heartbeatRuns.id, holderRunId),
-          eq(heartbeatRuns.status, snapshotStatus),
-        ),
-      )
-      .returning({ id: heartbeatRuns.id });
+      },
+      wakeupRequestId: null,
+      wakeupStatus: "cancelled",
+      wakeupError: "Execution lock released after issue reassigned to a different agent",
+    });
 
-    expect(cancelled).toHaveLength(0);
+    expect(cancelled.updated).toBe(false);
 
     const holder = await db
       .select({
@@ -271,3 +268,5 @@ describeEmbeddedPostgres("heartbeat lock release on cross-agent reassignment", (
     expect(issue?.executionRunId).toBe(holderRunId);
   });
 });
+
+import { finalizeTerminalRun } from "../services/terminal-run-finalizer.ts";
