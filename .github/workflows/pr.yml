@@ -160,6 +160,10 @@ jobs:
             group_label: workspaces-a
           - group: general-workspaces-b
             group_label: workspaces-b
+          # Sandbox providers are intentionally outside the root pnpm workspace
+          # lockfile, so run their own Vitest config as one isolated CI lane.
+          - group: general-daytona-plugin
+            group_label: Daytona plugin
 
     steps:
       - name: Checkout repository
@@ -185,6 +189,13 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Install isolated Daytona plugin test dependencies
+        if: matrix.group == 'general-daytona-plugin'
+        run: |
+          pnpm -C packages/plugins/sandbox-providers/daytona/image-build install --frozen-lockfile --ignore-scripts
+          mkdir -p packages/plugins/sandbox-providers/daytona/node_modules
+          ln -s ../image-build/node_modules/@daytonaio packages/plugins/sandbox-providers/daytona/node_modules/@daytonaio
 
       - name: Run grouped general test suites
         run: |

@@ -2207,7 +2207,14 @@ export async function cleanupExecutionWorkspaceArtifacts(input: {
     }
   }
 
+  // Project-primary local workspaces are owned by the project, not this execution
+  // workspace record. Archiving their execution session must preserve that shared
+  // directory and count as record-only cleanup.
+  const isRecordOnlyLocalWorkspace =
+    input.workspace.providerType === "local_fs" &&
+    !createdByRuntime;
   const cleaned =
+    isRecordOnlyLocalWorkspace ||
     !workspacePath ||
     !(await directoryExists(workspacePath));
 

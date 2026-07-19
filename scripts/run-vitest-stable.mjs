@@ -55,9 +55,18 @@ const allModeName = "all";
 const generalServerGroupName = "general-server";
 const generalWorkspacesAGroupName = "general-workspaces-a";
 const generalWorkspacesBGroupName = "general-workspaces-b";
+const generalDaytonaPluginGroupName = "general-daytona-plugin";
 const generalWorkspacesAProjects = ["@paperclipai/ui", "paperclipai"];
 const generalWorkspacesBProjects = nonServerProjects.filter((project) => !generalWorkspacesAProjects.includes(project));
-const generalGroupNames = [generalServerGroupName, generalWorkspacesAGroupName, generalWorkspacesBGroupName];
+const standaloneVitestConfigs = [
+  "packages/plugins/sandbox-providers/daytona/vitest.config.ts",
+];
+const generalGroupNames = [
+  generalServerGroupName,
+  generalWorkspacesAGroupName,
+  generalWorkspacesBGroupName,
+  generalDaytonaPluginGroupName,
+];
 const serializedServerVitestArgs = [
   "--no-file-parallelism",
   "--maxWorkers=1",
@@ -334,6 +343,13 @@ function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = 
     return;
   }
 
+  if (groupName === generalDaytonaPluginGroupName) {
+    for (const config of standaloneVitestConfigs) {
+      runVitest(["--config", config], `${groupName} ${config}`);
+    }
+    return;
+  }
+
   fail(`Unknown group "${groupName}".`);
 }
 
@@ -400,6 +416,11 @@ if (options.dryRun) {
             ? generalServerTestFiles.filter(
                 (_, index) => index % options.shardCount === options.shardIndex,
               )
+            : null,
+        selectedStandaloneVitestConfigs:
+          options.mode === generalModeName &&
+          options.group === generalDaytonaPluginGroupName
+            ? standaloneVitestConfigs
             : null,
       },
       null,

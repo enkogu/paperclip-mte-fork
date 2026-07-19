@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { parse as parseEnvContents } from "dotenv";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agents,
   companies,
@@ -2950,6 +2950,149 @@ describe("realizeExecutionWorkspace", () => {
       execFileAsync("git", ["branch", "--list", workspace.branchName!], { cwd: repoRoot }),
     ).resolves.toMatchObject({
       stdout: "",
+    });
+  });
+
+  it("archives a non-runtime-created local workspace without removing its project directory", async () => {
+    const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-project-primary-"));
+    try {
+      const cleanup = await cleanupExecutionWorkspaceArtifacts({
+        workspace: {
+          id: "execution-workspace-1",
+          cwd: workspacePath,
+          providerType: "local_fs",
+          providerRef: null,
+          branchName: null,
+          repoUrl: null,
+          baseRef: null,
+          projectId: "project-1",
+          projectWorkspaceId: "project-workspace-1",
+          sourceIssueId: "issue-1",
+          metadata: {
+            createdByRuntime: false,
+          },
+        },
+        projectWorkspace: {
+          cwd: workspacePath,
+          cleanupCommand: null,
+        },
+      });
+
+      expect(cleanup).toMatchObject({
+        cleaned: true,
+        cleanedPath: workspacePath,
+        warnings: [],
+      });
+      expect((await fs.stat(workspacePath)).isDirectory()).toBe(true);
+    } finally {
+      await fs.rm(workspacePath, { recursive: true, force: true });
+    }
+  });
+
+  it("removes a runtime-created local workspace when the directory is removable", async () => {
+    const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-local-"));
+    try {
+      const cleanup = await cleanupExecutionWorkspaceArtifacts({
+        workspace: {
+          id: "execution-workspace-1",
+          cwd: workspacePath,
+          providerType: "local_fs",
+          providerRef: null,
+          branchName: null,
+          repoUrl: null,
+          baseRef: null,
+          projectId: "project-1",
+          projectWorkspaceId: "project-workspace-1",
+          sourceIssueId: "issue-1",
+          metadata: {
+            createdByRuntime: true,
+          },
+        },
+        projectWorkspace: {
+          cwd: null,
+          cleanupCommand: null,
+        },
+      });
+
+      expect(cleanup).toMatchObject({
+        cleaned: true,
+        cleanedPath: workspacePath,
+        warnings: [],
+      });
+      await expect(fs.stat(workspacePath)).rejects.toThrow();
+    } finally {
+      await fs.rm(workspacePath, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when a runtime-created local workspace remains after cleanup", async () => {
+    const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-local-stuck-"));
+    const remove = vi.spyOn(fs, "rm").mockResolvedValue(undefined);
+    try {
+      const cleanup = await cleanupExecutionWorkspaceArtifacts({
+        workspace: {
+          id: "execution-workspace-1",
+          cwd: workspacePath,
+          providerType: "local_fs",
+          providerRef: null,
+          branchName: null,
+          repoUrl: null,
+          baseRef: null,
+          projectId: "project-1",
+          projectWorkspaceId: "project-workspace-1",
+          sourceIssueId: "issue-1",
+          metadata: {
+            createdByRuntime: true,
+          },
+        },
+        projectWorkspace: {
+          cwd: null,
+          cleanupCommand: null,
+        },
+      });
+
+      expect(cleanup).toMatchObject({
+        cleaned: false,
+        cleanedPath: workspacePath,
+        warnings: [],
+      });
+      expect((await fs.stat(workspacePath)).isDirectory()).toBe(true);
+    } finally {
+      remove.mockRestore();
+      await fs.rm(workspacePath, { recursive: true, force: true });
+    }
+  });
+
+  it("treats an already-absent git worktree as successful idempotent cleanup", async () => {
+    const repoRoot = await createTempRepo();
+    const missingWorktree = path.join(os.tmpdir(), `paperclip-missing-worktree-${randomUUID()}`);
+
+    const cleanup = await cleanupExecutionWorkspaceArtifacts({
+      workspace: {
+        id: "execution-workspace-1",
+        cwd: missingWorktree,
+        providerType: "git_worktree",
+        providerRef: missingWorktree,
+        branchName: null,
+        repoUrl: null,
+        baseRef: "HEAD",
+        projectId: "project-1",
+        projectWorkspaceId: "project-workspace-1",
+        sourceIssueId: "issue-1",
+        metadata: {
+          createdByRuntime: true,
+        },
+      },
+      projectWorkspace: {
+        cwd: repoRoot,
+        cleanupCommand: null,
+      },
+    });
+
+    expect(cleanup).toMatchObject({
+      cleaned: true,
+      cleanedPath: missingWorktree,
+      warnings: [],
     });
   });
 

@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const script = path.join(repoRoot, "scripts", "run-vitest-stable.mjs");
+const prWorkflow = readFileSync(path.join(repoRoot, ".github", "workflows", "pr.yml"), "utf8");
 
 function dryRun(args) {
   const result = spawnSync(process.execPath, [script, ...args, "--dry-run"], {
@@ -60,4 +62,17 @@ test("a route/authz suite never leaks into the general-server shards", () => {
 test("shard flags are rejected for the parallel workspace groups", () => {
   const result = dryRun(["--mode", "general", "--group", "general-workspaces-a", "--shard-index", "0", "--shard-count", "3"]);
   assert.notEqual(result.status, 0, "workspace groups must not accept shard flags");
+});
+
+test("the standalone Daytona provider suite stays in the general CI plan", () => {
+  const plan = dryRunJson(["--mode", "general", "--group", "general-daytona-plugin"]);
+  assert.deepEqual(plan.selectedStandaloneVitestConfigs, [
+    "packages/plugins/sandbox-providers/daytona/vitest.config.ts",
+  ]);
+  assert.match(prWorkflow, /group: general-daytona-plugin/);
+  assert.match(prWorkflow, /if: matrix\.group == 'general-daytona-plugin'/);
+  assert.match(
+    prWorkflow,
+    /daytona\/image-build install --frozen-lockfile --ignore-scripts/,
+  );
 });

@@ -836,6 +836,22 @@ describe("Daytona sandbox provider plugin", () => {
     });
   });
 
+  it("treats an already-missing sandbox as a successful idempotent destroy", async () => {
+    process.env.DAYTONA_API_KEY = "host-key";
+    mockGet.mockRejectedValue(new MockDaytonaNotFoundError("missing"));
+
+    await expect(plugin.definition.onEnvironmentDestroyLease?.({
+      driverKey: "daytona",
+      companyId: "company-1",
+      environmentId: "env-1",
+      providerLeaseId: "sandbox-123",
+      config: {
+        timeoutMs: 300000,
+        reuseLease: true,
+      },
+    })).resolves.toBeUndefined();
+  });
+
   it("resumes a reusable lease when the workspace sentinel matches", async () => {
     process.env.DAYTONA_API_KEY = "host-key";
     const sandbox = createMockSandbox({ id: "sandbox-reuse", state: "stopped" });
