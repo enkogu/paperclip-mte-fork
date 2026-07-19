@@ -37,9 +37,9 @@ jobs:
       - name: Generate commitperclip token
         id: token
         run: |
-          TOKEN=$(node .github/scripts/get-bot-token.mjs)
+          TOKEN="$(node .github/scripts/get-bot-token.mjs)"
           echo "::add-mask::$TOKEN"
-          echo "value=$TOKEN" >> $GITHUB_OUTPUT
+          echo "value=$TOKEN" >> "$GITHUB_OUTPUT"
         env:
           COMMITPERCLIP_KEY: ${{ secrets.COMMITPERCLIP_KEY }}
 

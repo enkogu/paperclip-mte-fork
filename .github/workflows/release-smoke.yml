@@ -73,6 +73,7 @@ jobs:
           SMOKE_METADATA_FILE="$metadata_file" \
           ./scripts/docker-onboard-smoke.sh
           set -a
+          # shellcheck source=/dev/null
           source "$metadata_file"
           set +a
           {
