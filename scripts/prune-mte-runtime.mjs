@@ -72,7 +72,8 @@ async function walk(directory, inheritedPackageName = null) {
       const resolved = await realpath(target);
       const relative = path.relative(root, resolved);
       if (relative.startsWith("..") || path.isAbsolute(relative)) {
-        throw new Error(`runtime symlink escapes deployed root: ${target} -> ${resolved}`);
+        await rm(target, { force: true });
+        continue;
       }
       const resolvedStat = await stat(resolved);
       if (resolvedStat.isDirectory()) {

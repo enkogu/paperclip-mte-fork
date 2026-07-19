@@ -93,6 +93,23 @@ test("pruner follows symlinks that stay inside the deployed closure", async () =
   }
 });
 
+test("pruner removes symlinks that escape the deployed closure", async () => {
+  const fixture = await makeFixture();
+  try {
+    const outside = path.join(fixture.parent, "source-workspace-package");
+    await writeFile(outside, "source fixture\n");
+    const escapingLink = path.join(fixture.root, "node_modules/source-workspace-link");
+    await symlink(outside, escapingLink);
+    const pruned = run(pruneScript, fixture.root);
+    assert.equal(pruned.status, 0, pruned.stderr);
+    await assert.rejects(() => stat(escapingLink));
+    const verified = run(verifyScript, fixture.root);
+    assert.equal(verified.status, 0, verified.stderr);
+  } finally {
+    await rm(fixture.parent, { recursive: true, force: true });
+  }
+});
+
 test("verifier rejects an executable transitive file even without a manifest bin field", async () => {
   const fixture = await makeFixture();
   try {
