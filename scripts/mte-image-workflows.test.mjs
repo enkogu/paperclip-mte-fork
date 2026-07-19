@@ -6,6 +6,11 @@ import test from "node:test";
 const root = path.resolve(import.meta.dirname, "..");
 const read = (relative) => readFile(path.join(root, relative), "utf8");
 
+test("MTE build workflow runs for the public default branch", async () => {
+  const workflow = await read(".github/workflows/mte-image-build.yml");
+  assert.match(workflow, /push:\n\s+branches: \[main, codex\/mte-immutable-runtime\]/);
+});
+
 test("MTE workflows set up the audited official gitleaks action before verification", async () => {
   for (const relative of [
     ".github/workflows/mte-image-build.yml",

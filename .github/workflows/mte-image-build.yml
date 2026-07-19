@@ -3,7 +3,7 @@ name: MTE image build
 on:
   pull_request:
   push:
-    branches: [codex/mte-immutable-runtime]
+    branches: [main, codex/mte-immutable-runtime]
 
 permissions:
   contents: read
