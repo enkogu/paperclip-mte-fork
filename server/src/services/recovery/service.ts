@@ -1306,7 +1306,8 @@ export function recoveryService(db: Db, deps: {
     silenceAgeMs: number | null;
     now: Date;
   }) {
-    if (!input.evidence) return { kind: "skipped" as const };
+    const evidence = input.evidence;
+    if (!evidence) return { kind: "skipped" as const };
     const finalRunStatus = input.sourceIssue.status === "cancelled" ? "cancelled" : "succeeded";
     if (!deps.releaseEnvironmentLeasesForRun) {
       throw new Error("Recovery terminal finalization requires environment lease release support");
@@ -1342,9 +1343,9 @@ export function recoveryService(db: Db, deps: {
           sourceIssueId: input.sourceIssue.id,
           sourceIssueIdentifier: input.sourceIssue.identifier,
           sourceIssueStatus: input.sourceIssue.status,
-          sameRunEvidenceKind: input.evidence.kind,
-          sameRunEvidenceId: input.evidence.id,
-          sameRunEvidenceAt: input.evidence.createdAt.toISOString(),
+          sameRunEvidenceKind: evidence.kind,
+          sameRunEvidenceId: evidence.id,
+          sameRunEvidenceAt: evidence.createdAt.toISOString(),
           silenceStartedAt: input.silenceStartedAt?.toISOString() ?? null,
           silenceAgeMs: input.silenceAgeMs,
           evaluationIssueId: input.existingEvaluation?.id ?? null,

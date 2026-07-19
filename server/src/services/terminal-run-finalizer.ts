@@ -160,8 +160,9 @@ export async function finalizeTerminalRun(
           ));
       }
 
-      if (input.runEvent) {
-        const eventSeq = input.runEvent.seq ?? await tx
+      const runEvent = input.runEvent;
+      if (runEvent) {
+        const eventSeq = runEvent.seq ?? await tx
           .select({ maxSeq: sql<number | null>`max(${heartbeatRunEvents.seq})` })
           .from(heartbeatRunEvents)
           .where(eq(heartbeatRunEvents.runId, terminalRun.id))
@@ -170,7 +171,7 @@ export async function finalizeTerminalRun(
           companyId: terminalRun.companyId,
           runId: terminalRun.id,
           agentId: terminalRun.agentId,
-          ...input.runEvent,
+          ...runEvent,
           seq: eventSeq,
         });
       }
