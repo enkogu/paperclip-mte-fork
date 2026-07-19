@@ -1391,7 +1391,7 @@ export function recoveryService(db: Db, deps: {
         "",
         `- Source issue: ${input.sourceIssue.identifier ?? input.sourceIssue.id}`,
         `- Run: \`${input.run.id}\``,
-        `- Same-run evidence: \`${input.evidence.kind}:${input.evidence.id}\` at ${input.evidence.createdAt.toISOString()}`,
+        `- Same-run evidence: \`${evidence.kind}:${evidence.id}\` at ${evidence.createdAt.toISOString()}`,
         "- Outcome: false positive; the source issue already reached a terminal disposition from this run.",
       ].join("\n"), { runId: input.run.id });
     }
@@ -1436,9 +1436,9 @@ export function recoveryService(db: Db, deps: {
         sourceIssueStatus: input.sourceIssue.status,
         evaluationIssueId: input.existingEvaluation?.id ?? null,
         watchdogDecisionId: decision.id,
-        sameRunEvidenceKind: input.evidence.kind,
-        sameRunEvidenceId: input.evidence.id,
-        sameRunEvidenceAt: input.evidence.createdAt.toISOString(),
+        sameRunEvidenceKind: evidence.kind,
+        sameRunEvidenceId: evidence.id,
+        sameRunEvidenceAt: evidence.createdAt.toISOString(),
         cleanup,
       },
     });
