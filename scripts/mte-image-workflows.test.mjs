@@ -38,6 +38,10 @@ test("Docker closure deploys and verifies the stable image ABI", async () => {
   const dockerfile = await read("Dockerfile.mte");
   assert.match(dockerfile, /pnpm -C \/tmp\/mte-daytona-build install --frozen-lockfile --ignore-scripts/);
   assert.match(dockerfile, /cp -R \/tmp\/mte-daytona-build\/package\.json[\s\S]*\/opt\/runtime\/plugins\/daytona/);
+  assert.match(
+    dockerfile,
+    /ln -s \.\.\/\.\.\/\.\.\/shared \/opt\/runtime\/plugins\/daytona\/local\/plugin-sdk\/node_modules\/@paperclipai\/shared/,
+  );
   assert.doesNotMatch(dockerfile, /--filter @paperclipai\/plugin-daytona(?:\.\.\.)? (?:build|deploy)/);
   assert.match(dockerfile, /node scripts\/verify-mte-runtime\.mjs \/opt\/runtime/);
   assert.match(dockerfile, /node \/opt\/runtime\/image-abi\/verify\.mjs \/opt\/runtime/);

@@ -25,5 +25,8 @@ The applicator is exact and idempotent: it accepts only the reviewed preimage or
 the already-applied result. Docker copies source plus locally built package
 outputs into a temporary workspace, performs a frozen script-disabled install,
 compiles Daytona, prunes dev dependencies, and copies only that closure into the
-runtime. Remove this package and the ABI copy/deploy steps when the official
+runtime. It also recreates the plugin SDK's internal `@paperclipai/shared`
+resolution link to the copied local package; the link cannot escape the deployed
+runtime root and is checked by both the closure verifier and the image ABI test.
+Remove this package and the ABI copy/deploy steps when the official
 Paperclip image exposes equivalent pinned package paths.

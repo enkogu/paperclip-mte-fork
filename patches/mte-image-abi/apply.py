@@ -4,7 +4,7 @@ from pathlib import Path
 dockerfile = Path(__file__).resolve().parents[2] / "Dockerfile.mte"
 source = dockerfile.read_text()
 
-before = """  && PAPERCLIP_RELEASE_REUSE_UI_DIST=1 pnpm --filter @paperclipai/server prepack \\
+legacy = """  && PAPERCLIP_RELEASE_REUSE_UI_DIST=1 pnpm --filter @paperclipai/server prepack \\
   && pnpm --filter @paperclipai/server... build \\
   && pnpm --filter @paperclipai/plugin-daytona... build \\
   && pnpm --filter @paperclipai/server deploy --prod /opt/runtime/server \\
@@ -17,7 +17,7 @@ before = """  && PAPERCLIP_RELEASE_REUSE_UI_DIST=1 pnpm --filter @paperclipai/se
   && node /opt/runtime/image-abi/verify.mjs /opt/runtime
 """
 
-after = """  && PAPERCLIP_RELEASE_REUSE_UI_DIST=1 pnpm --filter @paperclipai/server prepack \\
+before = """  && PAPERCLIP_RELEASE_REUSE_UI_DIST=1 pnpm --filter @paperclipai/server prepack \\
   && pnpm --filter @paperclipai/server... build \\
   && rm -rf /tmp/mte-daytona-build \\
   && cp -R packages/plugins/sandbox-providers/daytona/image-build /tmp/mte-daytona-build \\
@@ -38,10 +38,21 @@ after = """  && PAPERCLIP_RELEASE_REUSE_UI_DIST=1 pnpm --filter @paperclipai/ser
   && node /opt/runtime/image-abi/verify.mjs /opt/runtime
 """
 
+copy_line = "  && cp -R /tmp/mte-daytona-build/package.json /tmp/mte-daytona-build/dist /tmp/mte-daytona-build/node_modules /tmp/mte-daytona-build/local /opt/runtime/plugins/daytona/ \\\n"
+shared_link = """  && mkdir -p /opt/runtime/plugins/daytona/local/plugin-sdk/node_modules/@paperclipai \\
+  && ln -s ../../../shared /opt/runtime/plugins/daytona/local/plugin-sdk/node_modules/@paperclipai/shared \\
+"""
+after = before.replace(copy_line, copy_line + shared_link, 1)
+if after == before:
+    raise SystemExit("MTE image ABI patch definition is invalid")
+
 if after in source:
     print("Dockerfile.mte isolated Daytona image-build patch already applied")
 elif before in source:
     dockerfile.write_text(source.replace(before, after, 1))
     print("Applied Dockerfile.mte isolated Daytona image-build patch")
+elif legacy in source:
+    dockerfile.write_text(source.replace(legacy, after, 1))
+    print("Applied Dockerfile.mte isolated Daytona image-build patch from legacy preimage")
 else:
     raise SystemExit("Dockerfile.mte does not match the reviewed image ABI preimage")
