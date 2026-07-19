@@ -173,7 +173,9 @@ describe("sandbox managed runtime", () => {
     await writeFile(path.join(localHomeDir, "config.toml"), "model = 'fixture'\n", "utf8");
 
     const client: SandboxManagedRuntimeClient = {
-      makeDir: async (remotePath) => await mkdir(remotePath, { recursive: true }),
+      makeDir: async (remotePath) => {
+        await mkdir(remotePath, { recursive: true });
+      },
       writeFile: async (remotePath, bytes) => {
         await mkdir(path.dirname(remotePath), { recursive: true });
         await writeFile(remotePath, Buffer.from(bytes));
