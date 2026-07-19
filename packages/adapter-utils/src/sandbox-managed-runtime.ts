@@ -59,6 +59,7 @@ export interface SandboxManagedRuntimeAsset {
   localDir: string;
   followSymlinks?: boolean;
   exclude?: string[];
+  preserveAbsent?: string[];
 }
 
 /**
@@ -573,10 +574,14 @@ export async function prepareSandboxManagedRuntime(input: {
       );
       await input.client.writeFile(remoteAssetTar, toArrayBuffer(assetTarBytes), assetUpload.options);
       await assetUpload.finish(assetTarBytes.byteLength, assetTarBytes.byteLength);
+      const preservedAssetNames = Array.isArray(asset.preserveAbsent)
+        ? asset.preserveAbsent.filter((value) =>
+            typeof value === "string" && value !== "." && value !== ".." && /^[A-Za-z0-9._-]+$/.test(value))
+        : [];
       await input.client.run(
         `sh -c ${shellQuote(
-          `rm -rf ${shellQuote(remoteAssetDir)} && ` +
-            `mkdir -p ${shellQuote(remoteAssetDir)} && ` +
+          `mkdir -p ${shellQuote(remoteAssetDir)} && ` +
+            `find ${shellQuote(remoteAssetDir)} -mindepth 1 -maxdepth 1 ${preserveFindArgs(preservedAssetNames)} -exec rm -rf -- {} + && ` +
             `tar -xf ${shellQuote(remoteAssetTar)} -C ${shellQuote(remoteAssetDir)} && ` +
             `rm -f ${shellQuote(remoteAssetTar)}`,
         )}`,

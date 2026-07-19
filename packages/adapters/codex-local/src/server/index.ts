@@ -43,12 +43,23 @@ export const sessionCodec: AdapterSessionCodec = {
     const workspaceId = readNonEmptyString(record.workspaceId) ?? readNonEmptyString(record.workspace_id);
     const repoUrl = readNonEmptyString(record.repoUrl) ?? readNonEmptyString(record.repo_url);
     const repoRef = readNonEmptyString(record.repoRef) ?? readNonEmptyString(record.repo_ref);
+    const remoteExecution =
+      typeof record.remoteExecution === "object" &&
+      record.remoteExecution !== null &&
+      !Array.isArray(record.remoteExecution)
+        ? record.remoteExecution
+        : null;
+    const paperclipTaskKey = readNonEmptyString(record.paperclipTaskKey);
+    const paperclipBoundSessionId = readNonEmptyString(record.paperclipBoundSessionId);
     return {
       sessionId,
       ...(cwd ? { cwd } : {}),
       ...(workspaceId ? { workspaceId } : {}),
       ...(repoUrl ? { repoUrl } : {}),
       ...(repoRef ? { repoRef } : {}),
+      ...(remoteExecution ? { remoteExecution } : {}),
+      ...(paperclipTaskKey ? { paperclipTaskKey } : {}),
+      ...(paperclipBoundSessionId ? { paperclipBoundSessionId } : {}),
     };
   },
   serialize(params: Record<string, unknown> | null) {
@@ -62,12 +73,23 @@ export const sessionCodec: AdapterSessionCodec = {
     const workspaceId = readNonEmptyString(params.workspaceId) ?? readNonEmptyString(params.workspace_id);
     const repoUrl = readNonEmptyString(params.repoUrl) ?? readNonEmptyString(params.repo_url);
     const repoRef = readNonEmptyString(params.repoRef) ?? readNonEmptyString(params.repo_ref);
+    const remoteExecution =
+      typeof params.remoteExecution === "object" &&
+      params.remoteExecution !== null &&
+      !Array.isArray(params.remoteExecution)
+        ? params.remoteExecution
+        : null;
+    const paperclipTaskKey = readNonEmptyString(params.paperclipTaskKey);
+    const paperclipBoundSessionId = readNonEmptyString(params.paperclipBoundSessionId);
     return {
       sessionId,
       ...(cwd ? { cwd } : {}),
       ...(workspaceId ? { workspaceId } : {}),
       ...(repoUrl ? { repoUrl } : {}),
       ...(repoRef ? { repoRef } : {}),
+      ...(remoteExecution ? { remoteExecution } : {}),
+      ...(paperclipTaskKey ? { paperclipTaskKey } : {}),
+      ...(paperclipBoundSessionId ? { paperclipBoundSessionId } : {}),
     };
   },
   getDisplayId(params: Record<string, unknown> | null) {

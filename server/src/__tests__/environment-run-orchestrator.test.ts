@@ -264,6 +264,28 @@ describe("environmentRunOrchestrator — realizeForRun", () => {
     expect(mockResolveEnvironmentExecutionTarget).toHaveBeenCalledOnce();
   });
 
+  it("uses the stable provider lease identity for reusable sandbox sessions", async () => {
+    const environment = makeEnvironment("sandbox");
+    const lease = makeLease({ providerLeaseId: "provider-sandbox-1" });
+    mockResolveEnvironmentExecutionTarget.mockResolvedValue({
+      kind: "remote",
+      transport: "sandbox",
+      providerKey: "daytona",
+      environmentId: environment.id,
+      leaseId: "provider-sandbox-1",
+      remoteCwd: "/workspace/project",
+    });
+
+    const orchestrator = environmentRunOrchestrator(mockDb, {
+      environmentRuntime: makeMockRuntime(),
+    });
+    await orchestrator.realizeForRun(makeRealizeInput({ environment, lease }));
+
+    expect(mockResolveEnvironmentExecutionTarget).toHaveBeenCalledWith(
+      expect.objectContaining({ leaseId: "provider-sandbox-1" }),
+    );
+  });
+
   it("realization failure: runtime.realizeWorkspace throws → EnvironmentRunError with code workspace_realization_failed", async () => {
     const runtime = makeMockRuntime({
       realizeWorkspace: vi.fn().mockRejectedValue(new Error("sandbox unreachable")),

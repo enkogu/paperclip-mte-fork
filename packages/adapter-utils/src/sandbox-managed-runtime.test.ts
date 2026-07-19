@@ -162,6 +162,72 @@ describe("sandbox managed runtime", () => {
     expect(runtimeStatuses.at(-1)).toBe("finalize:Finalizing sandbox workspace");
   });
 
+  it("preserves only explicitly scoped remote asset directories", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-sandbox-assets-"));
+    cleanupDirs.push(rootDir);
+    const localWorkspaceDir = path.join(rootDir, "workspace");
+    const remoteWorkspaceDir = path.join(rootDir, "remote-workspace");
+    const localHomeDir = path.join(rootDir, "local-home");
+    await mkdir(localWorkspaceDir, { recursive: true });
+    await mkdir(localHomeDir, { recursive: true });
+    await writeFile(path.join(localHomeDir, "config.toml"), "model = 'fixture'\n", "utf8");
+
+    const client: SandboxManagedRuntimeClient = {
+      makeDir: async (remotePath) => await mkdir(remotePath, { recursive: true }),
+      writeFile: async (remotePath, bytes) => {
+        await mkdir(path.dirname(remotePath), { recursive: true });
+        await writeFile(remotePath, Buffer.from(bytes));
+      },
+      readFile: async (remotePath) => await readFile(remotePath),
+      listFiles: async () => [],
+      remove: async (remotePath) => await rm(remotePath, { recursive: true, force: true }),
+      run: async (command) => {
+        await execFile("sh", ["-c", command], { maxBuffer: 32 * 1024 * 1024 });
+      },
+    };
+    const input = {
+      spec: {
+        transport: "sandbox" as const,
+        provider: "test",
+        sandboxId: "sandbox-1",
+        remoteCwd: remoteWorkspaceDir,
+        timeoutMs: 30_000,
+        apiKey: null,
+      },
+      adapterKey: "codex",
+      client,
+      workspaceLocalDir: localWorkspaceDir,
+    };
+
+    const first = await prepareSandboxManagedRuntime({
+      ...input,
+      assets: [{ key: "home", localDir: localHomeDir }],
+    });
+    const remoteHome = first.assetDirs.home;
+    await mkdir(path.join(remoteHome, "sessions"), { recursive: true });
+    await writeFile(path.join(remoteHome, "sessions", "rollout.jsonl"), "saved thread\n", "utf8");
+    await writeFile(path.join(remoteHome, "stale"), "remove me\n", "utf8");
+
+    await prepareSandboxManagedRuntime({
+      ...input,
+      assets: [{ key: "home", localDir: localHomeDir, preserveAbsent: ["sessions"] }],
+    });
+
+    await expect(readFile(path.join(remoteHome, "sessions", "rollout.jsonl"), "utf8"))
+      .resolves.toBe("saved thread\n");
+    await expect(readFile(path.join(remoteHome, "config.toml"), "utf8"))
+      .resolves.toBe("model = 'fixture'\n");
+    await expect(readFile(path.join(remoteHome, "stale"), "utf8"))
+      .rejects.toMatchObject({ code: "ENOENT" });
+
+    await prepareSandboxManagedRuntime({
+      ...input,
+      assets: [{ key: "home", localDir: localHomeDir, preserveAbsent: ["../sessions"] }],
+    });
+    await expect(readFile(path.join(remoteHome, "sessions", "rollout.jsonl"), "utf8"))
+      .rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("syncs git-backed workspaces through a shallow standalone clone and keeps .git out of archives", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-sandbox-git-"));
     cleanupDirs.push(rootDir);

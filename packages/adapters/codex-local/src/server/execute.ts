@@ -236,6 +236,28 @@ function fallbackModeUsesFreshSession(mode: CodexTransientFallbackMode | null): 
   return mode === "fresh_session" || mode === "fresh_session_safer_invocation";
 }
 
+export function shouldPreserveRemoteCodexSessions(input: {
+  executionTargetIsRemote: boolean;
+  taskKey: string;
+  boundTaskKey: string;
+  sessionId: string;
+  boundSessionId: string;
+  cwdMatches: boolean;
+  remoteExecutionMatches: boolean;
+  forceFreshSession: boolean;
+}): boolean {
+  return (
+    input.executionTargetIsRemote === true &&
+    input.taskKey.trim().length > 0 &&
+    input.boundTaskKey.trim() === input.taskKey.trim() &&
+    input.sessionId.trim().length > 0 &&
+    input.boundSessionId.trim() === input.sessionId.trim() &&
+    input.cwdMatches === true &&
+    input.remoteExecutionMatches === true &&
+    input.forceFreshSession !== true
+  );
+}
+
 function buildCodexTransientHandoffNote(input: {
   previousSessionId: string | null;
   fallbackMode: CodexTransientFallbackMode;
@@ -454,6 +476,24 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     );
     const graceSec = asNumber(config.graceSec, 20);
     let effectiveExecutionCwd = adapterExecutionTargetRemoteCwd(executionTarget, cwd);
+    const assetSyncSessionParams = parseObject(runtime.sessionParams);
+    const assetSyncSessionId = asString(assetSyncSessionParams.sessionId, runtime.sessionId ?? "");
+    const assetSyncSessionCwd = asString(assetSyncSessionParams.cwd, "");
+    const preserveRemoteCodexSessions = shouldPreserveRemoteCodexSessions({
+      executionTargetIsRemote,
+      taskKey: asString(runtime.taskKey, ""),
+      boundTaskKey: asString(assetSyncSessionParams.paperclipTaskKey, ""),
+      sessionId: assetSyncSessionId,
+      boundSessionId: asString(assetSyncSessionParams.paperclipBoundSessionId, ""),
+      cwdMatches:
+        assetSyncSessionCwd.length === 0 ||
+        path.resolve(assetSyncSessionCwd) === path.resolve(effectiveExecutionCwd),
+      remoteExecutionMatches: adapterExecutionTargetSessionMatches(
+        parseObject(assetSyncSessionParams.remoteExecution),
+        executionTarget,
+      ),
+      forceFreshSession: fallbackModeUsesFreshSession(readCodexTransientFallbackMode(context)),
+    });
     const preparedExecutionTargetRuntime = executionTargetIsRemote
       ? await (async () => {
           await onLog(
@@ -487,6 +527,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                 // Auth, config, and skills (the bits Codex actually needs) are
                 // small and still uploaded.
                 exclude: ["tmp", ".tmp", "sessions", "shell_snapshots"],
+                preserveAbsent: preserveRemoteCodexSessions ? ["sessions"] : [],
               },
             ],
           });
@@ -648,8 +689,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const runtimeSessionId = asString(runtimeSessionParams.sessionId, runtime.sessionId ?? "");
     const runtimeSessionCwd = asString(runtimeSessionParams.cwd, "");
     const runtimeRemoteExecution = parseObject(runtimeSessionParams.remoteExecution);
+    const runtimeTaskKey = asString(runtime.taskKey, "").trim();
+    const runtimeSessionProvenanceMatches =
+      runtimeTaskKey.length > 0 &&
+      asString(runtimeSessionParams.paperclipTaskKey, "").trim() === runtimeTaskKey &&
+      asString(runtimeSessionParams.paperclipBoundSessionId, "").trim() === runtimeSessionId.trim();
     const canResumeSession =
-      runtimeSessionId.length > 0 &&
+      runtimeSessionProvenanceMatches && runtimeSessionId.length > 0 &&
       (runtimeSessionCwd.length === 0 || path.resolve(runtimeSessionCwd) === path.resolve(effectiveExecutionCwd)) &&
       adapterExecutionTargetSessionMatches(runtimeRemoteExecution, runtimeExecutionTarget);
     const codexTransientFallbackMode = readCodexTransientFallbackMode(context);
@@ -992,6 +1038,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         ? ({
           sessionId: resolvedSessionId,
           cwd: effectiveExecutionCwd,
+          ...(asString(runtime.taskKey, "").trim().length > 0
+            ? {
+                paperclipTaskKey: asString(runtime.taskKey, "").trim(),
+                paperclipBoundSessionId: resolvedSessionId,
+              }
+            : {}),
           ...(executionTargetIsRemote
             ? {
                 remoteExecution: adapterExecutionTargetSessionIdentity(runtimeExecutionTarget),

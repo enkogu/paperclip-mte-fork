@@ -474,7 +474,9 @@ export function environmentRunOrchestrator(
         companyId,
         adapterType,
         environment,
-        leaseId: lease.id,
+        leaseId: environment.driver === "sandbox" && lease.providerLeaseId
+          ? lease.providerLeaseId
+          : lease.id,
         leaseMetadata: (lease.metadata as Record<string, unknown> | null) ?? null,
         lease,
         environmentRuntime,

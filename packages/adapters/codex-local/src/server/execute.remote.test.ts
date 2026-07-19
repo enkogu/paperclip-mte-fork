@@ -70,7 +70,7 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
   };
 });
 
-import { execute } from "./execute.js";
+import { execute, shouldPreserveRemoteCodexSessions } from "./execute.js";
 
 describe("codex remote execution", () => {
   const cleanupDirs: string[] = [];
@@ -82,6 +82,28 @@ describe("codex remote execution", () => {
       if (!dir) continue;
       await rm(dir, { recursive: true, force: true }).catch(() => undefined);
     }
+  });
+
+  it("preserves remote rollouts only for the bound task, session, cwd, and sandbox", () => {
+    const matching = {
+      executionTargetIsRemote: true,
+      taskKey: "issue:alpha",
+      boundTaskKey: "issue:alpha",
+      sessionId: "session-alpha",
+      boundSessionId: "session-alpha",
+      cwdMatches: true,
+      remoteExecutionMatches: true,
+      forceFreshSession: false,
+    };
+
+    expect(shouldPreserveRemoteCodexSessions(matching)).toBe(true);
+    expect(shouldPreserveRemoteCodexSessions({ ...matching, taskKey: "issue:beta" })).toBe(false);
+    expect(shouldPreserveRemoteCodexSessions({ ...matching, boundSessionId: "session-other" })).toBe(false);
+    expect(shouldPreserveRemoteCodexSessions({ ...matching, taskKey: "" })).toBe(false);
+    expect(shouldPreserveRemoteCodexSessions({ ...matching, sessionId: "" })).toBe(false);
+    expect(shouldPreserveRemoteCodexSessions({ ...matching, cwdMatches: false })).toBe(false);
+    expect(shouldPreserveRemoteCodexSessions({ ...matching, remoteExecutionMatches: false })).toBe(false);
+    expect(shouldPreserveRemoteCodexSessions({ ...matching, forceFreshSession: true })).toBe(false);
   });
 
   it("prepares the workspace, syncs CODEX_HOME, and restores workspace changes for remote SSH execution", async () => {
@@ -290,6 +312,8 @@ describe("codex remote execution", () => {
         sessionParams: {
           sessionId: "session-123",
           cwd: managedRemoteWorkspace,
+          paperclipTaskKey: "issue:alpha",
+          paperclipBoundSessionId: "session-123",
           remoteExecution: {
             transport: "ssh",
             host: "127.0.0.1",
@@ -299,7 +323,7 @@ describe("codex remote execution", () => {
           },
         },
         sessionDisplayId: "session-123",
-        taskKey: null,
+        taskKey: "issue:alpha",
       },
       config: {
         command: "codex",
@@ -363,6 +387,8 @@ describe("codex remote execution", () => {
         sessionParams: {
           sessionId: "session-123",
           cwd: managedRemoteWorkspace,
+          paperclipTaskKey: "issue:alpha",
+          paperclipBoundSessionId: "session-123",
           remoteExecution: {
             transport: "ssh",
             host: "127.0.0.1",
@@ -372,7 +398,7 @@ describe("codex remote execution", () => {
           },
         },
         sessionDisplayId: "session-123",
-        taskKey: null,
+        taskKey: "issue:alpha",
       },
       config: {
         command: "codex",

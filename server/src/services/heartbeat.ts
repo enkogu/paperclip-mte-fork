@@ -4412,6 +4412,37 @@ function recordHeartbeatRunRuntimeProgress(
   return status;
 }
 
+export function parseCodexActionProgressEvent(rawLine: string) {
+  let event: unknown;
+  try {
+    event = JSON.parse(rawLine);
+  } catch {
+    return null;
+  }
+  if (!event || typeof event !== "object" || (event as Record<string, unknown>).type !== "item.completed") {
+    return null;
+  }
+  const item = (event as Record<string, unknown>).item;
+  if (!item || typeof item !== "object" || (item as Record<string, unknown>).type !== "command_execution") {
+    return null;
+  }
+  const record = item as Record<string, unknown>;
+  const rawStatus = typeof record.status === "string" ? record.status : "";
+  const status = rawStatus === "failed" || rawStatus === "declined" ? rawStatus : "completed";
+  const exitCode = Number.isSafeInteger(record.exit_code) ? (record.exit_code as number) : null;
+  return {
+    eventType: "tool.action" as const,
+    stream: "system" as const,
+    level: status === "completed" && (exitCode === null || exitCode === 0) ? "info" as const : "warn" as const,
+    message: "Codex shell action completed",
+    payload: {
+      toolName: "shell",
+      status,
+      ...(exitCode === null ? {} : { exitCode }),
+    },
+  };
+}
+
 function sanitizeLiveRunProgressText(value: string, maxChars: number): string | null {
   const normalized = value.replace(/\s+/g, " ").trim();
   if (!normalized) return null;
@@ -10564,12 +10595,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       workspaceConfig: {
         requestedMode: requestedExecutionWorkspaceMode,
         effectiveMode: effectiveExecutionWorkspaceMode,
-        issueConfigRevisionAt: issueContext?.updatedAt instanceof Date
-          ? issueContext.updatedAt.toISOString()
-          : issueContext?.updatedAt ?? null,
-        projectConfigRevisionAt: projectContext?.updatedAt instanceof Date
-          ? projectContext.updatedAt.toISOString()
-          : projectContext?.updatedAt ?? null,
         projectPolicy: projectExecutionWorkspacePolicy,
         issueSettings: issueExecutionWorkspaceSettings,
         reusableExecutionWorkspaceConfig: requestedReusableExecutionWorkspaceConfig,
@@ -10619,7 +10644,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const sessionConfigFreshness = resolveTaskSessionConfigFreshness({
       hasTaskSession: taskSession != null,
       configuredModel,
-      taskSessionParams: taskSessionDecodedParams,
+      taskSessionParams: taskSession?.sessionParamsJson ?? taskSessionDecodedParams,
       configMetadata: sessionConfigMetadata,
       wakeResetReason: wakeSessionResetReason,
       preserveLegacySessionWithoutConfigMetadata: acceptedPlanContinuationWake && !acceptedPlanWakeRoutingDecision,
@@ -11344,7 +11369,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .where(eq(heartbeatRuns.id, runId));
 
       const currentUserRedactionOptions = await getCurrentUserRedactionOptions();
+      let codexActionEventBuffer = "";
       const onLog = async (stream: "stdout" | "stderr", chunk: string) => {
+        if (agent.adapterType === "codex_local" && stream === "stdout") {
+          codexActionEventBuffer += chunk;
+          const lines = codexActionEventBuffer.split(/\r?\n/);
+          codexActionEventBuffer = lines.pop() ?? "";
+          if (codexActionEventBuffer.length > 65_536) {
+            codexActionEventBuffer = codexActionEventBuffer.slice(-65_536);
+          }
+          for (const line of lines) {
+            const actionEvent = parseCodexActionProgressEvent(line.trim());
+            if (actionEvent) await appendRunEvent(currentRun, seq++, actionEvent);
+          }
+        }
         const sanitizedChunk = compactRunLogChunk(
           redactCurrentUserText(chunk, currentUserRedactionOptions),
         );
@@ -11952,6 +11990,41 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       const finalizedRun = persistedRun ?? (await getRun(run.id));
       if (finalizedRun) {
+        await updateRuntimeState(agent, finalizedRun, adapterResult, {
+          legacySessionId: nextSessionState.legacySessionId,
+        }, normalizedUsage);
+        if (taskKey) {
+          if (adapterResult.clearSession || (!nextSessionState.params && !nextSessionState.displayId)) {
+            await clearTaskSessions(agent.companyId, agent.id, {
+              taskKey,
+              adapterType: agent.adapterType,
+            });
+          } else {
+            await upsertTaskSession({
+              companyId: agent.companyId,
+              agentId: agent.id,
+              adapterType: agent.adapterType,
+              taskKey,
+              sessionParamsJson: attachPaperclipSessionMetadataToSessionParams(
+                nextSessionState.params,
+                configuredModel,
+                sessionConfigMetadata,
+              ),
+              sessionDisplayId: nextSessionState.displayId,
+              lastRunId: finalizedRun.id,
+              lastError: outcome === "succeeded" ? null : (adapterResult.errorMessage ?? "run_failed"),
+            });
+          }
+        }
+      }
+      if (finalizedRun) {
+        await releaseEnvironmentLeasesForRun({
+          runId: finalizedRun.id,
+          companyId: finalizedRun.companyId,
+          agentId: finalizedRun.agentId,
+          status: finalizedRun.status,
+          failureReason: finalizedRun.error ?? undefined,
+        });
         await appendRunEvent(finalizedRun, seq++, {
           eventType: "lifecycle",
           stream: "system",
@@ -12100,34 +12173,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         }
       }
 
-      if (finalizedRun) {
-        await updateRuntimeState(agent, finalizedRun, adapterResult, {
-          legacySessionId: nextSessionState.legacySessionId,
-        }, normalizedUsage);
-        if (taskKey) {
-          if (adapterResult.clearSession || (!nextSessionState.params && !nextSessionState.displayId)) {
-            await clearTaskSessions(agent.companyId, agent.id, {
-              taskKey,
-              adapterType: agent.adapterType,
-            });
-          } else {
-            await upsertTaskSession({
-              companyId: agent.companyId,
-              agentId: agent.id,
-              adapterType: agent.adapterType,
-              taskKey,
-              sessionParamsJson: attachPaperclipSessionMetadataToSessionParams(
-                nextSessionState.params,
-                configuredModel,
-                sessionConfigMetadata,
-              ),
-              sessionDisplayId: nextSessionState.displayId,
-              lastRunId: finalizedRun.id,
-              lastError: outcome === "succeeded" ? null : (adapterResult.errorMessage ?? "run_failed"),
-            });
-          }
-        }
-      }
       await finalizeAgentStatus(
         agent.id,
         outcome,
