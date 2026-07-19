@@ -33,7 +33,7 @@ for (const [key, packageName] of expectedPackages) {
 }
 
 const pluginManifest = JSON.parse(await readFile(path.join(imageRoot, "plugins/daytona/package.json"), "utf8"));
-assert.equal(pluginManifest.dependencies?.["@daytonaio/sdk"], "0.171.0", "Daytona SDK must be exactly pinned");
+assert.equal(pluginManifest.dependencies?.["@daytonaio/sdk"], "0.175.0", "Daytona SDK must be exactly pinned");
 assert.equal(
   pluginManifest.dependencies?.["@paperclipai/plugin-sdk"],
   "file:./local/plugin-sdk",

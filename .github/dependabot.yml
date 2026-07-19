@@ -14,6 +14,26 @@ updates:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
 
+  # The Daytona provider is deliberately outside the root pnpm workspace and
+  # owns its own frozen lockfile, so it needs an explicit update source.
+  - package-ecosystem: npm
+    directory: "/packages/plugins/sandbox-providers/daytona/image-build"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+    groups:
+      daytona-image-build:
+        patterns:
+          - "*"
+    ignore:
+      # Keep the same major-version review policy as the root workspace.
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
   - package-ecosystem: github-actions
     directory: "/"
     schedule:

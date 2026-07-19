@@ -127,14 +127,14 @@ assert.equal(abi.packages.pluginShared, "/app/plugins/daytona/local/plugin-sdk/n
 assert.equal(abi.packages.piControlPlaneAdapter, "/app/server/node_modules/@paperclipai/adapter-pi-local");
 assert.match(imageAbiVerifier, /Daytona SDK must be exactly pinned/);
 assert.doesNotMatch(imageAbi, /pi-coding-agent|acpx|agent-harness/i);
-assert.equal(JSON.parse(daytonaPackage).dependencies["@daytonaio/sdk"], "0.171.0");
+assert.equal(JSON.parse(daytonaPackage).dependencies["@daytonaio/sdk"], "0.175.0");
 assert.equal(JSON.parse(daytonaPackage).dependencies["@paperclipai/plugin-sdk"], "workspace:*");
 assert.match(rootWorkspace, /- "!packages\/plugins\/sandbox-providers\/\*\*"/);
 assert.equal(daytonaBuildNpmrc.trim(), "shared-workspace-lockfile=false");
 const isolatedDaytonaPackage = JSON.parse(daytonaBuildPackage);
-assert.equal(isolatedDaytonaPackage.dependencies["@daytonaio/sdk"], "0.171.0");
+assert.equal(isolatedDaytonaPackage.dependencies["@daytonaio/sdk"], "0.175.0");
 assert.equal(isolatedDaytonaPackage.dependencies["@paperclipai/plugin-sdk"], "file:./local/plugin-sdk");
-assert.match(daytonaBuildLock, /specifier: 0\.171\.0\n\s+version: 0\.171\.0\(ws@/);
+assert.match(daytonaBuildLock, /specifier: 0\.175\.0\n\s+version: 0\.175\.0\(ws@/);
 assert.match(daytonaBuildLock, /'@paperclipai\/plugin-sdk@file:local\/plugin-sdk'/);
 assert.match(daytonaBuildLock, /'@paperclipai\/shared@file:local\/shared'/);
 

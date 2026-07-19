@@ -6,7 +6,7 @@ The supported upstream image does not provide the fork's required local Daytona
 plugin package path or a machine-readable way to prove the control-plane runtime
 closure. The smallest fork-only alternative is to build Daytona from its
 dedicated `image-build` workspace and deploy that isolated production closure
-beside the server. Its lock pins `@daytonaio/sdk` at `0.171.0` and resolves the
+beside the server. Its lock pins `@daytonaio/sdk` at `0.175.0` and resolves the
 locally built plugin SDK and shared packages through `file:` dependencies. The
 root workspace lock and peer policy remain outside this dependency domain.
 

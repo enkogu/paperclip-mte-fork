@@ -26,7 +26,7 @@ async function fixture() {
   await writeFile(path.join(root, "image-abi/manifest.json"), await readFile(abiSource));
   await writePackage(root, "plugins/daytona", {
     name: "@paperclipai/plugin-daytona",
-    dependencies: { "@daytonaio/sdk": "0.171.0", "@paperclipai/plugin-sdk": "file:./local/plugin-sdk" },
+    dependencies: { "@daytonaio/sdk": "0.175.0", "@paperclipai/plugin-sdk": "file:./local/plugin-sdk" },
   }, ["dist/manifest.js", "dist/worker.js"]);
   await writePackage(root, "plugins/daytona/node_modules/@daytonaio/sdk", { name: "@daytonaio/sdk" });
   await writePackage(root, "plugins/daytona/node_modules/@paperclipai/plugin-sdk", {
@@ -77,7 +77,7 @@ test("image ABI verifier rejects a floating Daytona SDK dependency", async () =>
   try {
     await writePackage(root, "plugins/daytona", {
       name: "@paperclipai/plugin-daytona",
-      dependencies: { "@daytonaio/sdk": "^0.171.0", "@paperclipai/plugin-sdk": "file:./local/plugin-sdk" },
+      dependencies: { "@daytonaio/sdk": "^0.175.0", "@paperclipai/plugin-sdk": "file:./local/plugin-sdk" },
     }, ["dist/manifest.js", "dist/worker.js"]);
     const result = run(root);
     assert.notEqual(result.status, 0);

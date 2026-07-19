@@ -53,9 +53,9 @@ test("Daytona image build owns one isolated frozen-lock importer", async () => {
   assert.equal(npmrc.trim(), "shared-workspace-lockfile=false");
   assert.match(workspace, /^packages:\n  - \.\n$/);
   assert.equal(manifest.name, "@paperclipai/plugin-daytona");
-  assert.equal(manifest.dependencies["@daytonaio/sdk"], "0.171.0");
+  assert.equal(manifest.dependencies["@daytonaio/sdk"], "0.175.0");
   assert.equal(manifest.dependencies["@paperclipai/plugin-sdk"], "file:./local/plugin-sdk");
-  assert.match(lock, /specifier: 0\.171\.0\n\s+version: 0\.171\.0\(ws@/);
+  assert.match(lock, /specifier: 0\.175\.0\n\s+version: 0\.175\.0\(ws@/);
   assert.match(lock, /specifier: file:\.\/local\/plugin-sdk\n\s+version: file:local\/plugin-sdk/);
   assert.match(lock, /'@paperclipai\/shared': file:local\/shared/);
   assert.equal([...lock.matchAll(/^  \.:$/gm)].length, 1, "isolated lock must contain exactly one importer");
