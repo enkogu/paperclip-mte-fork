@@ -14,6 +14,8 @@ export interface RemoteManagedRuntimeAsset {
   localDir: string;
   followSymlinks?: boolean;
   exclude?: string[];
+  /** Sandbox restore-only paths; SSH asset sync ignores this option. */
+  preserveAbsent?: string[];
 }
 
 export interface PreparedRemoteManagedRuntime {
