@@ -37,7 +37,7 @@ jobs:
           echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/paperclip-mte" >> "$GITHUB_ENV"
           echo "IMAGE_TAG=$GITHUB_REF_NAME" >> "$GITHUB_ENV"
       - run: node scripts/verify-mte-fork.mjs
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.11.1
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v3.11.1
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.6.0
         with:
           registry: ghcr.io
