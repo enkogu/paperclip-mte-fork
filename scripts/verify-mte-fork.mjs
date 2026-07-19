@@ -113,7 +113,7 @@ for (const source of [runtimePruner, runtimeVerifier]) {
   assert.doesNotMatch(source, /forbiddenExecutablePackages|@openai\/codex|@anthropic-ai\/claude-code|codex-acp/);
 }
 assert.match(runtimePruner, /delete manifest\.bin/);
-assert.match(runtimePruner, /stat\.mode & ~0o111/);
+assert.match(runtimePruner, /mode & ~0o111/);
 assert.match(runtimeVerifier, /runtime package exposes a bin entry/);
 assert.match(runtimeVerifier, /executable file outside the runtime allowlist/);
 assert.match(runtimeVerifier, /transitive package manifests were not inspected/);

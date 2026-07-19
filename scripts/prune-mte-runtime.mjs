@@ -1,10 +1,11 @@
 import { chmod, lstat, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-const root = path.resolve(process.argv[2] ?? "");
-if (!process.argv[2] || root === path.parse(root).root) {
+const requestedRoot = path.resolve(process.argv[2] ?? "");
+if (!process.argv[2] || requestedRoot === path.parse(requestedRoot).root) {
   throw new Error("usage: node scripts/prune-mte-runtime.mjs <deployed-runtime-root>");
 }
+const root = await realpath(requestedRoot);
 
 // The server can use the bundled PostgreSQL distribution for its own database.
 // It is the only production dependency allowed to retain executable files.
@@ -87,9 +88,9 @@ async function walk(directory, inheritedPackageName = null) {
     }
     if (!entry.isFile() || entry.name === "package.json") continue;
 
-    const stat = await lstat(target);
-    if ((stat.mode & 0o111) !== 0 && !executablePackageAllowlist.has(packageName)) {
-      await chmod(target, stat.mode & ~0o111);
+    const fileStat = await lstat(target);
+    if ((fileStat.mode & 0o111) !== 0 && !executablePackageAllowlist.has(packageName)) {
+      await chmod(target, fileStat.mode & ~0o111);
     }
   }
 }

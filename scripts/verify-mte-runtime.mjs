@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { lstat, readFile, readdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
-const root = path.resolve(process.argv[2] ?? "");
-assert.ok(process.argv[2] && root !== path.parse(root).root, "runtime root argument is required");
+const requestedRoot = path.resolve(process.argv[2] ?? "");
+assert.ok(process.argv[2] && requestedRoot !== path.parse(requestedRoot).root, "runtime root argument is required");
+const root = await realpath(requestedRoot);
 
 const readJson = async (file) => JSON.parse(await readFile(file, "utf8"));
 const exists = async (file) => Boolean(await lstat(file).catch(() => null));
@@ -100,9 +101,9 @@ async function walk(directory, inheritedPackageName = null) {
     }
     if (!entry.isFile()) continue;
     inspectedFiles += 1;
-    const stat = await lstat(target);
+    const fileStat = await lstat(target);
     assert.ok(
-      (stat.mode & 0o111) === 0 || executablePackageAllowlist.has(packageName),
+      (fileStat.mode & 0o111) === 0 || executablePackageAllowlist.has(packageName),
       `executable file outside the runtime allowlist: ${target} (package ${packageName ?? "<unknown>"})`,
     );
   }
