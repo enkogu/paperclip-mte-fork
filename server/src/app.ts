@@ -70,6 +70,7 @@ import type { BetterAuthSessionResult } from "./auth/better-auth.js";
 import { createCachedViteHtmlRenderer } from "./vite-html-renderer.js";
 import { DEFAULT_JSON_BODY_LIMIT, PORTABLE_JSON_BODY_LIMIT } from "./http/body-limits.js";
 import { COMPANY_IMPORT_API_PATH } from "./routes/company-import-paths.js";
+import { createRequestRateLimiter } from "./middleware/request-rate-limit.js";
 
 type UiMode = "none" | "static" | "vite-dev";
 const FEEDBACK_EXPORT_FLUSH_INTERVAL_MS = 5_000;
@@ -200,7 +201,17 @@ export async function createApp(
       resolveSession: opts.resolveSession,
     }),
   );
-  app.use("/api/auth", authRoutes(db));
+  // Public auth traffic is capped separately from application API traffic.
+  // The actor middleware runs first so signed-in callers receive their own
+  // budget while anonymous callers are isolated by proxy-aware source IP.
+  app.use(
+    "/api/auth",
+    createRequestRateLimiter({
+      name: "auth",
+      policy: { maxRequests: 120, windowMs: 60_000 },
+    }),
+    authRoutes(db),
+  );
   if (opts.betterAuthHandler) {
     app.all("/api/auth/{*authPath}", opts.betterAuthHandler);
   }
@@ -223,6 +234,45 @@ export async function createApp(
     }),
   );
   api.use(openApiRoutes());
+  // Challenge creation mints a pending board token, so bound anonymous
+  // creation tightly while preserving the CLI's one-second status polling.
+  api.use(
+    "/cli-auth/challenges",
+    createRequestRateLimiter({
+      name: "cli-auth-challenge",
+      policy: (req) => {
+        if (req.method === "POST" && req.path === "/") {
+          return { maxRequests: 10, windowMs: 10 * 60_000 };
+        }
+        if (req.method === "POST") return { maxRequests: 30, windowMs: 10 * 60_000 };
+        return { maxRequests: 180, windowMs: 10 * 60_000 };
+      },
+    }),
+  );
+  // These groups can start a local model process or perform network-backed
+  // environment work. Keep the limit per principal so agents do not share an
+  // anonymous/NAT bucket once authenticated.
+  api.use(
+    "/board/chat",
+    createRequestRateLimiter({
+      name: "board-chat",
+      policy: { maxRequests: 20, windowMs: 60_000 },
+    }),
+  );
+  api.use(
+    "/environments",
+    createRequestRateLimiter({
+      name: "environment-operation",
+      policy: { maxRequests: 30, windowMs: 60_000 },
+    }),
+  );
+  api.use(
+    "/companies/:companyId/environments",
+    createRequestRateLimiter({
+      name: "company-environment-operation",
+      policy: { maxRequests: 30, windowMs: 60_000 },
+    }),
+  );
   api.use("/companies", companyRoutes(db, opts.storageService));
   api.use(llmRoutes(db));
   api.use(companySkillRoutes(db));
