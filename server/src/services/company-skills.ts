@@ -47,7 +47,7 @@ import type {
 } from "@paperclipai/shared";
 import { normalizeAgentUrlKey, parseFrontmatterMarkdown } from "@paperclipai/shared";
 import { resolvePaperclipInstanceRoot } from "../home-paths.js";
-import { conflict, notFound, unprocessable } from "../errors.js";
+import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import { ghFetch, gitHubApiBase, resolveRawGitHubUrl } from "./github-fetch.js";
 import { agentService } from "./agents.js";
 import { projectService } from "./projects.js";
@@ -371,6 +371,11 @@ const PROJECT_ROOT_SKILL_SUBDIRECTORIES = [
 const SKILL_AUDIT_SCAN_VERSION = "skills-audit-v1";
 const MAX_CATALOG_FILE_BYTES = 1024 * 1024;
 
+type LocalSkillImportAuthorization = {
+  allowAnyLocalPath?: boolean;
+  allowedLocalRoots?: string[];
+};
+
 function asString(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
@@ -381,11 +386,57 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function strictCompanySkillFilePath(value: unknown, label = "Company skill file path") {
+  if (typeof value !== "string" || value.length === 0) {
+    throw unprocessable(`${label} must be a non-empty relative path.`);
+  }
+  if (
+    value.includes("\\")
+    || value !== value.trim()
+    || /[\u0000-\u001f\u007f]/.test(value)
+    || path.posix.isAbsolute(value)
+    || path.win32.isAbsolute(value)
+    || value.split("/").some((segment) => !segment || segment === "." || segment === ".." || segment.includes(":"))
+  ) {
+    throw unprocessable(`${label} is invalid: ${value}`);
+  }
+  const normalized = normalizePortablePath(value);
+  if (!normalized || normalized !== value) {
+    throw unprocessable(`${label} is invalid: ${value}`);
+  }
+  return normalized;
+}
+
+function isPathInside(root: string, candidate: string) {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+async function authorizeLocalSkillImportPath(
+  sourcePath: string,
+  authorization: LocalSkillImportAuthorization = {},
+) {
+  const canonicalSource = await fs.realpath(path.resolve(sourcePath)).catch(() => null);
+  if (!canonicalSource) {
+    throw unprocessable(`Skill source path does not exist: ${sourcePath}`);
+  }
+  if (authorization.allowAnyLocalPath) return canonicalSource;
+
+  const canonicalRoots = (await Promise.all(
+    (authorization.allowedLocalRoots ?? []).map((root) => fs.realpath(path.resolve(root)).catch(() => null)),
+  )).filter((root): root is string => Boolean(root));
+  if (!canonicalRoots.some((root) => isPathInside(root, canonicalSource))) {
+    throw forbidden(
+      "Local skill imports require an instance administrator, local implicit operator, or an operator-allowlisted root.",
+    );
+  }
+  return canonicalSource;
+}
+
 function normalizePackageFileMap(files: Record<string, string>) {
   const out: Record<string, string> = {};
   for (const [rawPath, content] of Object.entries(files)) {
-    const nextPath = normalizePortablePath(rawPath);
-    if (!nextPath) continue;
+    const nextPath = strictCompanySkillFilePath(rawPath, "Imported package file path");
     out[nextPath] = content;
   }
   return out;
@@ -888,12 +939,22 @@ async function walkLocalFiles(root: string, current: string, out: string[]) {
   for (const entry of entries) {
     if (entry.name === ".git" || entry.name === "node_modules") continue;
     const absolutePath = path.join(current, entry.name);
+    if (entry.isSymbolicLink()) {
+      const [canonicalRoot, target] = await Promise.all([
+        fs.realpath(root),
+        fs.realpath(absolutePath).catch(() => null),
+      ]);
+      if (!target || !isPathInside(canonicalRoot, target)) {
+        throw unprocessable(`Local skill source contains a symlink outside its root: ${entry.name}`);
+      }
+      throw unprocessable(`Local skill source contains an unsupported symlink: ${entry.name}`);
+    }
     if (entry.isDirectory()) {
       await walkLocalFiles(root, absolutePath, out);
       continue;
     }
     if (!entry.isFile()) continue;
-    out.push(normalizePortablePath(path.relative(root, absolutePath)));
+    out.push(strictCompanySkillFilePath(normalizePortablePath(path.relative(root, absolutePath))));
   }
 }
 
@@ -1273,7 +1334,7 @@ function normalizeFileInventory(row: { fileInventory: unknown }): CompanySkillFi
     ? row.fileInventory.flatMap((entry) => {
       if (!isPlainRecord(entry)) return [];
       return [{
-        path: String(entry.path ?? ""),
+        path: strictCompanySkillFilePath(entry.path, "Persisted company skill inventory path"),
         kind: (String(entry.kind ?? "other") as CompanySkillFileInventoryEntry["kind"]),
       }];
     })
@@ -1391,7 +1452,7 @@ function serializeFileInventory(
   fileInventory: CompanySkillFileInventoryEntry[],
 ): Array<Record<string, unknown>> {
   return fileInventory.map((entry) => ({
-    path: entry.path,
+    path: strictCompanySkillFilePath(entry.path),
     kind: entry.kind,
   }));
 }
@@ -1400,7 +1461,7 @@ function serializeVersionFileInventory(
   fileInventory: CompanySkillVersionFileInventoryEntry[],
 ): CompanySkillVersionFileInventoryEntry[] {
   return fileInventory.map((entry) => ({
-    path: entry.path,
+    path: strictCompanySkillFilePath(entry.path, "Company skill version path"),
     kind: entry.kind,
     content: entry.content,
   }));
@@ -1414,7 +1475,7 @@ function toCompanySkillVersion(row: CompanySkillVersionRow): CompanySkillVersion
       ? row.fileInventory.flatMap((entry) => {
         if (!isPlainRecord(entry)) return [];
         return [{
-          path: String(entry.path ?? ""),
+          path: strictCompanySkillFilePath(entry.path, "Persisted company skill version path"),
           kind: (String(entry.kind ?? "other") as CompanySkillFileInventoryEntry["kind"]),
           content: String(entry.content ?? ""),
         }];
@@ -1730,7 +1791,7 @@ function resolveManagedSkillsRoot(companyId: string) {
 }
 
 function resolveLocalSkillFilePath(skill: CompanySkill, relativePath: string) {
-  const normalized = normalizePortablePath(relativePath);
+  const normalized = strictCompanySkillFilePath(relativePath);
   const skillDir = normalizeSkillDirectory(skill);
   if (skillDir) {
     return path.resolve(skillDir, normalized);
@@ -1851,7 +1912,7 @@ async function auditInstalledSkillBytes(skill: CompanySkill): Promise<CompanySki
 
   const { files, findings } = await collectSkillFileBytes(skillDir);
   const actualPaths = files.map((file) => file.path).sort((left, right) => left.localeCompare(right));
-  const expectedPaths = skill.fileInventory.map((entry) => normalizePortablePath(entry.path)).sort((left, right) => left.localeCompare(right));
+  const expectedPaths = skill.fileInventory.map((entry) => strictCompanySkillFilePath(entry.path)).sort((left, right) => left.localeCompare(right));
   const installedHash = buildInventoryContentHash(files.map((file) => ({
     path: file.path,
     sha256: sha256Buffer(file.bytes),
@@ -2951,7 +3012,7 @@ export function companySkillService(db: Db) {
     const skill = await getById(companyId, skillId);
     if (!skill) return null;
 
-    const normalizedPath = normalizePortablePath(relativePath || "SKILL.md");
+    const normalizedPath = strictCompanySkillFilePath(relativePath || "SKILL.md");
     const fileEntry = skill.fileInventory.find((entry) => entry.path === normalizedPath);
     if (!fileEntry) {
       throw notFound("Skill file not found");
@@ -3198,7 +3259,7 @@ export function companySkillService(db: Db) {
       throw unprocessable(source.editableReason ?? "This skill cannot be edited.");
     }
 
-    const normalizedPath = normalizePortablePath(relativePath);
+    const normalizedPath = strictCompanySkillFilePath(relativePath);
     const absolutePath = resolveLocalSkillFilePath(skill, normalizedPath);
     if (!absolutePath) throw notFound("Skill file not found");
 
@@ -3643,12 +3704,13 @@ export function companySkillService(db: Db) {
     await fs.mkdir(skillDir, { recursive: true });
 
     for (const entry of skill.fileInventory) {
-      const sourcePath = entry.path === "SKILL.md"
+      const relativePath = strictCompanySkillFilePath(entry.path);
+      const sourcePath = relativePath === "SKILL.md"
         ? `${packageDir}/SKILL.md`
-        : `${packageDir}/${entry.path}`;
+        : `${packageDir}/${relativePath}`;
       const content = normalizedFiles[sourcePath];
       if (typeof content !== "string") continue;
-      const targetPath = path.resolve(skillDir, entry.path);
+      const targetPath = path.resolve(skillDir, relativePath);
       await fs.mkdir(path.dirname(targetPath), { recursive: true });
       await fs.writeFile(targetPath, content, "utf8");
     }
@@ -3705,12 +3767,13 @@ export function companySkillService(db: Db) {
     const replacement = await createDirectoryReplacement(skillDir);
     try {
       for (const entry of catalogSkill.files) {
-        const targetPath = path.resolve(replacement.stagingDir, entry.path);
+        const relativePath = strictCompanySkillFilePath(entry.path, "Catalog file path");
+        const targetPath = path.resolve(replacement.stagingDir, relativePath);
         if (targetPath !== replacement.stagingDir && !targetPath.startsWith(`${replacement.stagingDir}${path.sep}`)) {
           throw unprocessable(`Catalog file path is invalid: ${entry.path}`);
         }
         await fs.mkdir(path.dirname(targetPath), { recursive: true });
-        await copyCatalogSkillFile(catalogSkill.id, entry.path, targetPath);
+        await copyCatalogSkillFile(catalogSkill.id, relativePath, targetPath);
       }
       await replacement.commit();
     } catch (error) {
@@ -3735,12 +3798,13 @@ export function companySkillService(db: Db) {
     const replacement = await createDirectoryReplacement(snapshotDir);
     try {
       for (const entry of catalogSkill.files) {
-        const targetPath = path.resolve(replacement.stagingDir, entry.path);
+        const relativePath = strictCompanySkillFilePath(entry.path, "Catalog file path");
+        const targetPath = path.resolve(replacement.stagingDir, relativePath);
         if (targetPath !== replacement.stagingDir && !targetPath.startsWith(`${replacement.stagingDir}${path.sep}`)) {
           throw unprocessable(`Catalog file path is invalid: ${entry.path}`);
         }
         await fs.mkdir(path.dirname(targetPath), { recursive: true });
-        await copyCatalogSkillFile(catalogSkill.id, entry.path, targetPath);
+        await copyCatalogSkillFile(catalogSkill.id, relativePath, targetPath);
       }
       await replacement.commit();
     } catch (error) {
@@ -4004,11 +4068,11 @@ export function companySkillService(db: Db) {
 
     let wroteSkillFile = false;
     for (const entry of skill.fileInventory) {
-      const normalizedPath = normalizePortablePath(entry.path);
+      const normalizedPath = strictCompanySkillFilePath(entry.path);
       const detail = await readFile(companyId, skill.id, normalizedPath).catch(() => null);
       const content = detail?.content ?? (normalizedPath === "SKILL.md" ? skill.markdown : null);
       if (content === null) continue;
-      const targetPath = path.resolve(skillDir, entry.path);
+      const targetPath = path.resolve(skillDir, normalizedPath);
       await fs.mkdir(path.dirname(targetPath), { recursive: true });
       await fs.writeFile(targetPath, content, "utf8");
       if (normalizedPath === "SKILL.md") wroteSkillFile = true;
@@ -4023,8 +4087,7 @@ export function companySkillService(db: Db) {
   }
 
   function resolveVersionSnapshotPath(skillDir: string, relativePath: string) {
-    const normalizedPath = normalizePortablePath(relativePath);
-    if (!normalizedPath) return null;
+    const normalizedPath = strictCompanySkillFilePath(relativePath, "Company skill version path");
     const targetPath = path.resolve(skillDir, normalizedPath);
     if (targetPath !== skillDir && !targetPath.startsWith(`${skillDir}${path.sep}`)) {
       throw unprocessable(`Skill version file path is invalid: ${relativePath}`);
@@ -4369,13 +4432,20 @@ export function companySkillService(db: Db) {
     return out;
   }
 
-  async function importFromSource(companyId: string, source: string): Promise<CompanySkillImportResult> {
+  async function importFromSource(
+    companyId: string,
+    source: string,
+    localAuthorization: LocalSkillImportAuthorization = {},
+  ): Promise<CompanySkillImportResult> {
     await ensureSkillInventoryCurrent(companyId);
     const parsed = parseSkillImportSourceInput(source);
     const local = !/^https?:\/\//i.test(parsed.resolvedSource);
+    const authorizedLocalSource = local
+      ? await authorizeLocalSkillImportPath(parsed.resolvedSource, localAuthorization)
+      : null;
     const { skills, warnings } = local
       ? {
-        skills: (await readLocalSkillImports(companyId, parsed.resolvedSource))
+        skills: (await readLocalSkillImports(companyId, authorizedLocalSource!))
           .filter((skill) => !parsed.requestedSkillSlug || skill.slug === parsed.requestedSkillSlug),
         warnings: parsed.warnings,
       }
