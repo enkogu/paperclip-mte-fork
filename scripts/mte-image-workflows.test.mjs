@@ -238,16 +238,43 @@ test("Dependabot config rejects duplicate YAML mapping keys and Daytona entries"
   );
 });
 
-test("MTE workflows set up the audited official gitleaks action before verification", async () => {
+function assertChecksumPinnedGitleaksCli(workflow, relative) {
+  const setup = workflowStep(workflow, "Install checksum-pinned Gitleaks CLI");
+  const setupIndex = workflow.indexOf(setup);
+  const verifyIndex = workflow.indexOf("node scripts/verify-mte-fork.mjs");
+
+  assert.ok(setupIndex >= 0 && verifyIndex > setupIndex, `${relative} must install gitleaks before verification`);
+  assert.match(setup, /GITLEAKS_VERSION: "8\.30\.1"/);
+  assert.match(setup, /GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"/);
+  assert.match(
+    setup,
+    /https:\/\/github\.com\/gitleaks\/gitleaks\/releases\/download\/v\$\{GITLEAKS_VERSION\}\/gitleaks_\$\{GITLEAKS_VERSION\}_linux_x64\.tar\.gz/,
+  );
+  assert.match(setup, /sha256sum --check -/);
+  assert.match(setup, /tar --extract --gzip --file "\$archive" --directory "\$RUNNER_TEMP" gitleaks/);
+  assert.match(setup, /echo "\$RUNNER_TEMP" >> "\$GITHUB_PATH"/);
+  assert.doesNotMatch(workflow, /gitleaks\/gitleaks-action|GITHUB_TOKEN:/);
+}
+
+test("MTE workflows install the checksum-pinned license-free Gitleaks CLI before verification", async () => {
   for (const relative of [
     ".github/workflows/mte-image-build.yml",
     ".github/workflows/mte-image-publish.yml",
   ]) {
     const workflow = await read(relative);
-    const setup = workflow.indexOf("gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7");
-    const verify = workflow.indexOf("node scripts/verify-mte-fork.mjs");
-    assert.ok(setup >= 0 && verify > setup, `${relative} must set up gitleaks before verification`);
-    assert.match(workflow, /GITLEAKS_VERSION: "8\.30\.1"/);
+    assertChecksumPinnedGitleaksCli(workflow, relative);
+  }
+});
+
+test("MTE workflow contract rejects mutable or unchecked Gitleaks installation", async () => {
+  const workflow = await read(".github/workflows/mte-image-build.yml");
+  for (const mutated of [
+    workflow.replace("GITLEAKS_VERSION: \"8.30.1\"", "GITLEAKS_VERSION: \"latest\""),
+    workflow.replace("551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb", "0".repeat(64)),
+    workflow.replace('          echo "${GITLEAKS_SHA256}  ${archive}" | sha256sum --check -\n', ""),
+    workflow.replace("      - name: Install checksum-pinned Gitleaks CLI", "      - uses: gitleaks/gitleaks-action@v2"),
+  ]) {
+    assert.throws(() => assertChecksumPinnedGitleaksCli(mutated, "mutated workflow"), assert.AssertionError);
   }
 });
 

@@ -63,10 +63,17 @@ assert.match(buildWorkflow, /permissions:\n  contents: read/);
 assert.doesNotMatch(buildWorkflow, /packages: write|id-token: write|push: true/);
 assert.match(publishWorkflow, /permissions:\n  contents: write\n  packages: write\n  id-token: write/);
 for (const workflow of [buildWorkflow, publishWorkflow]) {
-  const setup = workflow.indexOf("uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7");
+  const setup = workflow.indexOf("- name: Install checksum-pinned Gitleaks CLI");
   const verify = workflow.indexOf("run: node scripts/verify-mte-fork.mjs");
-  assert.ok(setup >= 0 && verify > setup, "checksum-pinned official gitleaks setup must precede MTE verification");
+  assert.ok(setup >= 0 && verify > setup, "checksum-pinned Gitleaks CLI install must precede MTE verification");
   assert.match(workflow, /GITLEAKS_VERSION: "8\.30\.1"/);
+  assert.match(
+    workflow,
+    /GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"/,
+  );
+  assert.match(workflow, /sha256sum --check -/);
+  assert.match(workflow, /gitleaks_\$\{GITLEAKS_VERSION\}_linux_x64\.tar\.gz/);
+  assert.doesNotMatch(workflow, /gitleaks\/gitleaks-action|GITHUB_TOKEN:/);
 }
 assert.match(publishWorkflow, /tags: \[mte-v\*\]/);
 assert.doesNotMatch(publishWorkflow, /workflow_dispatch|branches:/);
