@@ -19,7 +19,7 @@ function assertCodeqlWorkflow(workflow) {
   for (const action of ["init", "analyze"]) {
     assert.match(
       workflow,
-      new RegExp(`github/codeql-action/${action}@bb16b9baa2ec4010b29f5c606d57d01190139edd`),
+      new RegExp(`github/codeql-action/${action}@7188fc363630916deb702c7fdcf4e481b751f97a`),
     );
   }
   assert.match(workflow, /languages: javascript-typescript/);
@@ -37,7 +37,7 @@ test("CodeQL workflow guard rejects widened permissions and build wrappers", asy
     workflow.replace("  security-events: write", "  security-events: write\n  packages: write"),
     workflow.replace("          build-mode: none", "          build-mode: autobuild"),
     workflow.replace("      - name: Analyze and upload results", "      - run: pnpm install\n\n      - name: Analyze and upload results"),
-    workflow.replace("bb16b9baa2ec4010b29f5c606d57d01190139edd", "v4"),
+    workflow.replace("7188fc363630916deb702c7fdcf4e481b751f97a", "v4"),
   ]) {
     assert.throws(() => assertCodeqlWorkflow(mutated), assert.AssertionError);
   }
