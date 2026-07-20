@@ -9,6 +9,11 @@ dedicated `image-build` workspace and deploy that isolated production closure
 beside the server. Its lock pins `@daytonaio/sdk` at `0.175.0` and resolves the
 locally built plugin SDK and shared packages through `file:` dependencies. The
 root workspace lock and peer policy remain outside this dependency domain.
+The deployed server receives one closure-internal package link at
+`/app/server/node_modules/@paperclipai/plugin-daytona`, pointing to the same
+verified `/app/plugins/daytona` package. This makes normal Node package
+resolution and the Paperclip plugin loader agree on one immutable plugin copy;
+the runtime verifier rejects links that escape the image closure.
 
 The image continues to exclude the operator CLI and agent-harness/ACP
 executables. Pi is represented only by Paperclip's server-side

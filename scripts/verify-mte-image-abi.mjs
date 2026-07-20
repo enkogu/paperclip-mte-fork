@@ -13,6 +13,7 @@ assert.deepEqual(abi.verifyCommand, ["node", "/app/image-abi/verify.mjs"]);
 
 const expectedPackages = new Map([
   ["daytonaPlugin", "@paperclipai/plugin-daytona"],
+  ["daytonaServerResolver", "@paperclipai/plugin-daytona"],
   ["daytonaSdk", "@daytonaio/sdk"],
   ["pluginSdk", "@paperclipai/plugin-sdk"],
   ["pluginShared", "@paperclipai/shared"],
