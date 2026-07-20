@@ -45,21 +45,28 @@ shared_link = """  && mkdir -p /opt/runtime/plugins/daytona/local/plugin-sdk/nod
 server_resolver_link = """  && mkdir -p /opt/runtime/server/node_modules/@paperclipai \\
   && ln -s ../../../plugins/daytona /opt/runtime/server/node_modules/@paperclipai/plugin-daytona \\
 """
+server_sdk_resolver_link = """  && mkdir -p /opt/runtime/server/node_modules/@daytonaio \\
+  && ln -s ../../../plugins/daytona/node_modules/@daytonaio/sdk /opt/runtime/server/node_modules/@daytonaio/sdk \\
+"""
 with_shared_link = before.replace(copy_line, copy_line + shared_link, 1)
-after = with_shared_link.replace(shared_link, shared_link + server_resolver_link, 1)
-if with_shared_link == before or after == with_shared_link:
+with_server_resolver = with_shared_link.replace(shared_link, shared_link + server_resolver_link, 1)
+after = with_server_resolver.replace(server_resolver_link, server_resolver_link + server_sdk_resolver_link, 1)
+if with_shared_link == before or with_server_resolver == with_shared_link or after == with_server_resolver:
     raise SystemExit("MTE image ABI patch definition is invalid")
 
 if after in source:
-    print("Dockerfile.mte isolated Daytona image-build and server resolver patch already applied")
+    print("Dockerfile.mte isolated Daytona image-build and server resolver closure patch already applied")
+elif with_server_resolver in source:
+    dockerfile.write_text(source.replace(with_server_resolver, after, 1))
+    print("Applied Daytona SDK server resolver link to Dockerfile.mte")
 elif with_shared_link in source:
     dockerfile.write_text(source.replace(with_shared_link, after, 1))
-    print("Applied Daytona server resolver link to Dockerfile.mte")
+    print("Applied Daytona server resolver closure links to Dockerfile.mte")
 elif before in source:
     dockerfile.write_text(source.replace(before, after, 1))
-    print("Applied Dockerfile.mte isolated Daytona image-build and server resolver patch")
+    print("Applied Dockerfile.mte isolated Daytona image-build and server resolver closure patch")
 elif legacy in source:
     dockerfile.write_text(source.replace(legacy, after, 1))
-    print("Applied Dockerfile.mte isolated Daytona image-build and server resolver patch from legacy preimage")
+    print("Applied Dockerfile.mte isolated Daytona image-build and server resolver closure patch from legacy preimage")
 else:
     raise SystemExit("Dockerfile.mte does not match the reviewed image ABI preimage")

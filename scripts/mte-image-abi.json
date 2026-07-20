@@ -5,6 +5,7 @@
     "daytonaPlugin": "/app/plugins/daytona",
     "daytonaServerResolver": "/app/server/node_modules/@paperclipai/plugin-daytona",
     "daytonaSdk": "/app/plugins/daytona/node_modules/@daytonaio/sdk",
+    "daytonaSdkServerResolver": "/app/server/node_modules/@daytonaio/sdk",
     "pluginSdk": "/app/plugins/daytona/node_modules/@paperclipai/plugin-sdk",
     "pluginShared": "/app/plugins/daytona/local/plugin-sdk/node_modules/@paperclipai/shared",
     "piControlPlaneAdapter": "/app/server/node_modules/@paperclipai/adapter-pi-local",

@@ -9,11 +9,15 @@ dedicated `image-build` workspace and deploy that isolated production closure
 beside the server. Its lock pins `@daytonaio/sdk` at `0.175.0` and resolves the
 locally built plugin SDK and shared packages through `file:` dependencies. The
 root workspace lock and peer policy remain outside this dependency domain.
-The deployed server receives one closure-internal package link at
+The deployed server receives closure-internal package links at
 `/app/server/node_modules/@paperclipai/plugin-daytona`, pointing to the same
-verified `/app/plugins/daytona` package. This makes normal Node package
-resolution and the Paperclip plugin loader agree on one immutable plugin copy;
-the runtime verifier rejects links that escape the image closure.
+verified `/app/plugins/daytona` package, and at
+`/app/server/node_modules/@daytonaio/sdk`, pointing to the SDK already present
+inside that plugin's production closure. These exact named links make normal
+Node package resolution, the Paperclip plugin loader, and server-root ABI
+probes agree on one immutable copy of each package. No whole `node_modules`
+tree is shared or duplicated; the runtime verifier rejects links that escape
+the image closure.
 
 The image continues to exclude the operator CLI and agent-harness/ACP
 executables. Pi is represented only by Paperclip's server-side
@@ -33,5 +37,8 @@ compiles Daytona, prunes dev dependencies, and copies only that closure into the
 runtime. It also recreates the plugin SDK's internal `@paperclipai/shared`
 resolution link to the copied local package; the link cannot escape the deployed
 runtime root and is checked by both the closure verifier and the image ABI test.
+The ABI verifier also loads the real Daytona ESM entrypoint and resolves both
+the plugin and Daytona SDK from the server context, so a missing transitive SDK
+or broken resolver link fails the image build.
 Remove this package and the ABI copy/deploy steps when the official
 Paperclip image exposes equivalent pinned package paths.

@@ -26,14 +26,26 @@ async function fixture() {
   await writeFile(path.join(root, "image-abi/manifest.json"), await readFile(abiSource));
   await writePackage(root, "plugins/daytona", {
     name: "@paperclipai/plugin-daytona",
+    type: "module",
+    exports: { ".": "./dist/index.js" },
     dependencies: { "@daytonaio/sdk": "0.175.0", "@paperclipai/plugin-sdk": "file:./local/plugin-sdk" },
   }, ["dist/manifest.js", "dist/worker.js"]);
-  await writePackage(root, "plugins/daytona/node_modules/@daytonaio/sdk", { name: "@daytonaio/sdk" });
+  await writeFile(
+    path.join(root, "plugins/daytona/dist/index.js"),
+    'import "@daytonaio/sdk"; import "@paperclipai/plugin-sdk"; export {};\n',
+  );
+  await writePackage(root, "plugins/daytona/node_modules/@daytonaio/sdk", {
+    name: "@daytonaio/sdk",
+    type: "module",
+    exports: "./index.js",
+  }, ["index.js"]);
   await writePackage(root, "plugins/daytona/node_modules/@paperclipai/plugin-sdk", {
     name: "@paperclipai/plugin-sdk",
     version: "1.0.0",
+    type: "module",
+    exports: "./index.js",
     dependencies: { "@paperclipai/shared": "file:../shared" },
-  });
+  }, ["index.js"]);
   await writePackage(root, "plugins/daytona/local/plugin-sdk/node_modules/@paperclipai/shared", {
     name: "@paperclipai/shared",
   });
@@ -41,6 +53,11 @@ async function fixture() {
   await symlink(
     "../../../plugins/daytona",
     path.join(root, "server/node_modules/@paperclipai/plugin-daytona"),
+  );
+  await mkdir(path.join(root, "server/node_modules/@daytonaio"), { recursive: true });
+  await symlink(
+    "../../../plugins/daytona/node_modules/@daytonaio/sdk",
+    path.join(root, "server/node_modules/@daytonaio/sdk"),
   );
   await writePackage(root, "server/node_modules/@paperclipai/adapter-pi-local", { name: "@paperclipai/adapter-pi-local" });
   await writePackage(root, "server/node_modules/@aws-sdk/client-s3", { name: "@aws-sdk/client-s3" });
@@ -89,11 +106,25 @@ test("image ABI verifier rejects a missing server-side Daytona resolver", async 
   }
 });
 
+test("image ABI verifier rejects a missing server-side Daytona SDK resolver", async () => {
+  const root = await fixture();
+  try {
+    await rm(path.join(root, "server/node_modules/@daytonaio/sdk"), { force: true });
+    const result = run(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /ABI package manifest is missing|Cannot find package/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("image ABI verifier rejects a floating Daytona SDK dependency", async () => {
   const root = await fixture();
   try {
     await writePackage(root, "plugins/daytona", {
       name: "@paperclipai/plugin-daytona",
+      type: "module",
+      exports: { ".": "./dist/index.js" },
       dependencies: { "@daytonaio/sdk": "^0.175.0", "@paperclipai/plugin-sdk": "file:./local/plugin-sdk" },
     }, ["dist/manifest.js", "dist/worker.js"]);
     const result = run(root);

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { readFile, stat } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const imageRoot = path.resolve(process.argv[2] ?? path.dirname(scriptDirectory));
@@ -15,23 +16,51 @@ const expectedPackages = new Map([
   ["daytonaPlugin", "@paperclipai/plugin-daytona"],
   ["daytonaServerResolver", "@paperclipai/plugin-daytona"],
   ["daytonaSdk", "@daytonaio/sdk"],
+  ["daytonaSdkServerResolver", "@daytonaio/sdk"],
   ["pluginSdk", "@paperclipai/plugin-sdk"],
   ["pluginShared", "@paperclipai/shared"],
   ["piControlPlaneAdapter", "@paperclipai/adapter-pi-local"],
   ["s3ControlPlaneClient", "@aws-sdk/client-s3"],
 ]);
 
+const packageDirectories = new Map();
 for (const [key, packageName] of expectedPackages) {
   const absoluteAbiPath = abi.packages?.[key];
   assert.equal(typeof absoluteAbiPath, "string", `missing ABI package path: ${key}`);
   assert.ok(absoluteAbiPath.startsWith("/app/"), `ABI package path must be image-absolute: ${key}`);
   const packageDirectory = path.join(imageRoot, path.relative("/app", absoluteAbiPath));
+  packageDirectories.set(key, packageDirectory);
   const manifestPath = path.join(packageDirectory, "package.json");
   const manifestStat = await stat(manifestPath).catch(() => null);
   assert.ok(manifestStat?.isFile(), `ABI package manifest is missing: ${absoluteAbiPath}`);
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   assert.equal(manifest.name, packageName, `unexpected package at ABI path: ${absoluteAbiPath}`);
 }
+
+async function assertServerResolution(packageName, expectedDirectory, label) {
+  const serverRequire = createRequire(path.join(imageRoot, "server/package.json"));
+  const resolvedEntry = serverRequire.resolve(packageName);
+  const [resolvedRealPath, expectedRealPath] = await Promise.all([
+    realpath(resolvedEntry),
+    realpath(expectedDirectory),
+  ]);
+  const relative = path.relative(expectedRealPath, resolvedRealPath);
+  assert.ok(
+    relative && !relative.startsWith("..") && !path.isAbsolute(relative),
+    `${label} resolved outside its verified image package: ${resolvedEntry}`,
+  );
+}
+
+await assertServerResolution(
+  "@paperclipai/plugin-daytona",
+  packageDirectories.get("daytonaPlugin"),
+  "Daytona plugin",
+);
+await assertServerResolution(
+  "@daytonaio/sdk",
+  packageDirectories.get("daytonaSdk"),
+  "Daytona SDK",
+);
 
 const pluginManifest = JSON.parse(await readFile(path.join(imageRoot, "plugins/daytona/package.json"), "utf8"));
 assert.equal(pluginManifest.dependencies?.["@daytonaio/sdk"], "0.175.0", "Daytona SDK must be exactly pinned");
@@ -57,5 +86,6 @@ assert.ok(
   (await stat(path.join(imageRoot, "plugins/daytona/dist/worker.js")).catch(() => null))?.isFile(),
   "Daytona plugin worker build output is missing",
 );
+await import(pathToFileURL(path.join(packageDirectories.get("daytonaPlugin"), "dist/index.js")).href);
 
 console.log(JSON.stringify({ ok: true, schemaVersion: abi.schemaVersion, packages: abi.packages }));
