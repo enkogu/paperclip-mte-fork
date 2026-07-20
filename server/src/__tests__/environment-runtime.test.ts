@@ -23,6 +23,7 @@ import {
   plugins,
   projects,
 } from "@paperclipai/db";
+import type { EnvironmentLease } from "@paperclipai/shared";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -393,6 +394,22 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
     });
 
     return { pluginId, companyId, agentId, environment, runId, executionWorkspaceId, reusableLease };
+  }
+
+  async function cloneReusableLease(
+    lease: EnvironmentLease,
+  ) {
+    return await environmentService(db).acquireLease({
+      companyId: lease.companyId,
+      environmentId: lease.environmentId,
+      executionWorkspaceId: lease.executionWorkspaceId,
+      issueId: lease.issueId,
+      heartbeatRunId: lease.heartbeatRunId,
+      leasePolicy: lease.leasePolicy,
+      provider: lease.provider,
+      providerLeaseId: lease.providerLeaseId,
+      metadata: lease.metadata,
+    });
   }
 
   it("acquires and releases a local run lease through the runtime seam", async () => {
@@ -1839,6 +1856,101 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
       failureReason: "execution_workspace_closed",
       cleanupStatus: "success",
     });
+  });
+
+  it("uses a successful sibling lease as proof that duplicate provider cleanup is complete", async () => {
+    const { companyId, executionWorkspaceId, reusableLease } =
+      await seedReusablePluginSandboxLease();
+    await environmentService(db).releaseLease(reusableLease.id, "expired", {
+      failureReason: "first_cleanup",
+      cleanupStatus: "success",
+    });
+    const duplicateLease = await cloneReusableLease(reusableLease);
+    await environmentService(db).releaseLease(duplicateLease.id, "pending_cleanup", {
+      failureReason: "duplicate_cleanup_failed",
+      cleanupStatus: "failed",
+    });
+
+    const workerManager = {
+      isRunning: vi.fn(() => true),
+      call: vi.fn(async () => {
+        throw new Error("provider resource is already gone");
+      }),
+    } as unknown as PluginWorkerManager;
+    const runtimeWithPlugin = environmentRuntimeService(db, { pluginWorkerManager: workerManager });
+
+    const destroyed = await runtimeWithPlugin.destroyReusableSandboxLeases({
+      companyId,
+      executionWorkspaceId,
+      failureReason: "cleanup_retry",
+    });
+
+    expect(destroyed).toHaveLength(1);
+    expect(workerManager.call).not.toHaveBeenCalled();
+    await expect(environmentService(db).getLeaseById(duplicateLease.id)).resolves.toMatchObject({
+      status: "expired",
+      failureReason: "cleanup_retry",
+      cleanupStatus: "success",
+    });
+  });
+
+  it("destroys a duplicate provider lease only once within one cleanup batch", async () => {
+    const { pluginId, companyId, executionWorkspaceId, reusableLease } =
+      await seedReusablePluginSandboxLease();
+    const duplicateLease = await cloneReusableLease(reusableLease);
+    const workerManager = {
+      isRunning: vi.fn((id: string) => id === pluginId),
+      call: vi.fn(async (_pluginId: string, method: string) => {
+        if (method !== "environmentDestroyLease") {
+          throw new Error(`Unexpected plugin method: ${method}`);
+        }
+        return undefined;
+      }),
+    } as unknown as PluginWorkerManager;
+    const runtimeWithPlugin = environmentRuntimeService(db, { pluginWorkerManager: workerManager });
+
+    const destroyed = await runtimeWithPlugin.destroyReusableSandboxLeases({
+      companyId,
+      executionWorkspaceId,
+      failureReason: "execution_workspace_closed",
+    });
+
+    expect(destroyed).toHaveLength(2);
+    expect(workerManager.call).toHaveBeenCalledTimes(1);
+    for (const lease of [reusableLease, duplicateLease]) {
+      await expect(environmentService(db).getLeaseById(lease.id)).resolves.toMatchObject({
+        status: "expired",
+        cleanupStatus: "success",
+      });
+    }
+  });
+
+  it("does not treat a failed provider cleanup as proof for duplicate leases", async () => {
+    const { pluginId, companyId, executionWorkspaceId, reusableLease } =
+      await seedReusablePluginSandboxLease();
+    const duplicateLease = await cloneReusableLease(reusableLease);
+    const workerManager = {
+      isRunning: vi.fn((id: string) => id === pluginId),
+      call: vi.fn(async () => {
+        throw new Error("provider unavailable");
+      }),
+    } as unknown as PluginWorkerManager;
+    const runtimeWithPlugin = environmentRuntimeService(db, { pluginWorkerManager: workerManager });
+
+    const destroyed = await runtimeWithPlugin.destroyReusableSandboxLeases({
+      companyId,
+      executionWorkspaceId,
+      failureReason: "cleanup_retry",
+    });
+
+    expect(destroyed).toHaveLength(2);
+    expect(workerManager.call).toHaveBeenCalledTimes(2);
+    for (const lease of [reusableLease, duplicateLease]) {
+      await expect(environmentService(db).getLeaseById(lease.id)).resolves.toMatchObject({
+        status: "pending_cleanup",
+        cleanupStatus: "failed",
+      });
+    }
   });
 
   it("retries reusable plugin-backed sandbox destroy when the worker is unavailable", async () => {

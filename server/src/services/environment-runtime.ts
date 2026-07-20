@@ -1362,6 +1362,16 @@ function readString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+function providerLeaseCleanupIdentity(
+  lease: Pick<EnvironmentLease, "environmentId" | "provider" | "providerLeaseId" | "metadata">,
+): string | null {
+  const provider = readString(lease.provider) ?? readString(lease.metadata?.provider);
+  const providerLeaseId = readString(lease.providerLeaseId);
+  if (!provider || !providerLeaseId) return null;
+  const pluginId = readString(lease.metadata?.pluginId) ?? "";
+  return `${lease.environmentId}\u0000${pluginId}\u0000${provider}\u0000${providerLeaseId}`;
+}
+
 const INTERNAL_PLUGIN_SANDBOX_CONFIG_KEYS = new Set([
   "driver",
   "executionWorkspaceMode",
@@ -1827,6 +1837,28 @@ export function environmentRuntimeService(
       ].filter((condition): condition is NonNullable<typeof condition> => Boolean(condition));
       if (scopeConditions.length === 0) return [];
 
+      // A reusable provider resource can legitimately be represented by more
+      // than one Paperclip lease row as it moves between runs. Seed the batch
+      // with durable proof of an earlier successful destroy so a retry of a
+      // sibling pending_cleanup row does not call the provider twice.
+      const priorSuccessfulRows = await db
+        .select()
+        .from(environmentLeases)
+        .where(
+          and(
+            eq(environmentLeases.companyId, input.companyId),
+            eq(environmentLeases.leasePolicy, "reuse_by_environment"),
+            eq(environmentLeases.status, "expired"),
+            eq(environmentLeases.cleanupStatus, "success"),
+            ...scopeConditions,
+          ),
+        );
+      const successfullyCleanedProviderLeases = new Set(
+        priorSuccessfulRows
+          .map((row) => providerLeaseCleanupIdentity(toEnvironmentLeaseSnapshot(row)))
+          .filter((identity): identity is string => identity !== null),
+      );
+
       const leaseRows = await db
         .select()
         .from(environmentLeases)
@@ -1844,17 +1876,30 @@ export function environmentRuntimeService(
         const environment = await environmentsSvc.getById(leaseRow.environmentId);
         if (!environment) continue;
         const leaseSnapshot = toEnvironmentLeaseSnapshot(leaseRow);
-        const driver = getDriver(getLeaseDriverKey(leaseSnapshot, environment));
-        const lease = driver?.destroyRunLease
-          ? await driver.destroyRunLease({
-              environment,
-              lease: leaseSnapshot,
-              failureReason: input.failureReason ?? "reusable_lease_destroyed",
-            })
-          : await environmentsSvc.releaseLease(leaseSnapshot.id, "pending_cleanup", {
-              failureReason: input.failureReason ?? "reusable_lease_destroyed",
-              cleanupStatus: "failed",
-            });
+        const cleanupIdentity = providerLeaseCleanupIdentity(leaseSnapshot);
+        const failureReason = input.failureReason ?? "reusable_lease_destroyed";
+        let lease: EnvironmentLease | null;
+        if (cleanupIdentity && successfullyCleanedProviderLeases.has(cleanupIdentity)) {
+          lease = await environmentsSvc.releaseLease(leaseSnapshot.id, "expired", {
+            failureReason,
+            cleanupStatus: "success",
+          });
+        } else {
+          const driver = getDriver(getLeaseDriverKey(leaseSnapshot, environment));
+          lease = driver?.destroyRunLease
+            ? await driver.destroyRunLease({
+                environment,
+                lease: leaseSnapshot,
+                failureReason,
+              })
+            : await environmentsSvc.releaseLease(leaseSnapshot.id, "pending_cleanup", {
+                failureReason,
+                cleanupStatus: "failed",
+              });
+          if (cleanupIdentity && lease?.status === "expired" && lease.cleanupStatus === "success") {
+            successfullyCleanedProviderLeases.add(cleanupIdentity);
+          }
+        }
         if (!lease) continue;
         destroyed.push({
           environment,
