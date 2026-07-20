@@ -21,6 +21,7 @@ RUN corepack enable \
   && pnpm -C /tmp/mte-daytona-build run build \
   && pnpm -C /tmp/mte-daytona-build prune --prod --ignore-scripts \
   && pnpm --filter @paperclipai/server deploy --prod /opt/runtime/server \
+  && node scripts/normalize-mte-workspace-exports.mjs /opt/runtime/server \
   && mkdir -p /opt/runtime/plugins/daytona \
   && cp -R /tmp/mte-daytona-build/package.json /tmp/mte-daytona-build/dist /tmp/mte-daytona-build/node_modules /tmp/mte-daytona-build/local /opt/runtime/plugins/daytona/ \
   && mkdir -p /opt/runtime/plugins/daytona/local/plugin-sdk/node_modules/@paperclipai \
@@ -32,6 +33,7 @@ RUN corepack enable \
   && mkdir -p /opt/runtime/image-abi \
   && cp scripts/verify-mte-image-abi.mjs /opt/runtime/image-abi/verify.mjs \
   && cp scripts/mte-image-abi.json /opt/runtime/image-abi/manifest.json \
+  && cp scripts/smoke-mte-server-runtime.mjs /opt/runtime/image-abi/smoke-server.mjs \
   && node scripts/prune-mte-runtime.mjs /opt/runtime \
   && node scripts/verify-mte-runtime.mjs /opt/runtime \
   && node /opt/runtime/image-abi/verify.mjs /opt/runtime
@@ -64,5 +66,7 @@ ENV NODE_ENV=production \
   PAPERCLIP_DEPLOYMENT_EXPOSURE=private
 
 USER node
+
+RUN node /app/image-abi/smoke-server.mjs /app/server
 EXPOSE 3100
 CMD ["node", "dist/index.js"]

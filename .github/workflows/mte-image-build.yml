@@ -36,6 +36,8 @@ jobs:
       - run: node scripts/verify-mte-fork.mjs
       - name: Guard the CodeQL workflow contract
         run: node --test scripts/codeql-workflow.test.mjs
+      - name: Verify MTE server runtime closure source contracts
+        run: node --test scripts/mte-server-runtime-closure.test.mjs
       - name: Set up pnpm for the isolated Daytona plugin test
         uses: pnpm/action-setup@b0f76dfb45f55f8421693e4803ac7bb65143bd34 # v6
         with:
