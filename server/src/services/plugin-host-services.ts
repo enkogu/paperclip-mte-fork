@@ -517,7 +517,7 @@ export function buildHostServices(
         const status = await inspectPluginLocalFolder({
           folderKey: declaration.folderKey,
           declaration,
-          storedConfig: await getStoredLocalFolderConfig(companyId, declaration.folderKey),
+          storedConfig: await getValidatedStoredLocalFolderConfig(companyId, declaration.folderKey),
         });
         const prefix = `localFolders.${declaration.folderKey}`;
         variables[`${prefix}.path`] = status.realPath ?? status.path ?? null;

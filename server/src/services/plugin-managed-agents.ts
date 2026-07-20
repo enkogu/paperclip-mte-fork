@@ -327,8 +327,9 @@ export function pluginManagedAgentService(
     agent: Agent,
     declaration: PluginManagedAgentDeclaration,
     materializeOptions: { replaceExisting: boolean },
+    templateVariables?: Record<string, string | null | undefined>,
   ): Promise<Agent> {
-    const variables = await optionsForInstructionVariables(companyId);
+    const variables = templateVariables ?? await optionsForInstructionVariables(companyId);
     const declared = declaredInstructionFiles(declaration, variables);
     if (!declared) return agent;
 
@@ -414,6 +415,11 @@ export function pluginManagedAgentService(
       .then((rows) => rows[0] ?? null);
     if (!company) throw notFound("Company not found");
 
+    // Resolve template values before any durable agent mutation. A rejected
+    // local-folder grant must not leave behind a partially provisioned agent.
+    const templateVariables = declaration.instructions
+      ? await optionsForInstructionVariables(companyId)
+      : undefined;
     const requiresApproval = company.requireBoardApprovalForNewAgents;
     const adapterType = await resolveManagedAdapterType(companyId, declaration);
     let created = await agentSvc.create(companyId, {
@@ -423,7 +429,13 @@ export function pluginManagedAgentService(
       spentMonthlyCents: 0,
       lastHeartbeatAt: null,
     }) as Agent;
-    created = await materializeDeclaredInstructions(companyId, created, declaration, { replaceExisting: true });
+    created = await materializeDeclaredInstructions(
+      companyId,
+      created,
+      declaration,
+      { replaceExisting: true },
+      templateVariables,
+    );
 
     let approvalId: string | null = null;
     if (requiresApproval) {
@@ -524,6 +536,9 @@ export function pluginManagedAgentService(
       const declaration = declarationFor(agentKey);
       const reconciled = await reconcile(agentKey, companyId);
       if (!reconciled.agent) return reconciled;
+      const templateVariables = declaration.instructions
+        ? await optionsForInstructionVariables(companyId)
+        : undefined;
       const currentMetadata = reconciled.agent.metadata && typeof reconciled.agent.metadata === "object"
         ? reconciled.agent.metadata
         : {};
@@ -537,7 +552,13 @@ export function pluginManagedAgentService(
         },
       });
       if (!updated) throw notFound("Managed agent not found");
-      const updatedAgent = await materializeDeclaredInstructions(companyId, updated as Agent, declaration, { replaceExisting: true });
+      const updatedAgent = await materializeDeclaredInstructions(
+        companyId,
+        updated as Agent,
+        declaration,
+        { replaceExisting: true },
+        templateVariables,
+      );
       await upsertBinding(companyId, declaration, updatedAgent.id, {}, adapterType);
       await logActivity(db, {
         companyId,

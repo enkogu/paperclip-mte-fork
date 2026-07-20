@@ -464,6 +464,13 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
       categories: ["automation"],
       capabilities: ["local.folders"],
       entrypoints: { worker: "./dist/worker.js" },
+      agents: [{
+        agentKey: "path-aware",
+        displayName: "Path-aware agent",
+        instructions: {
+          content: "Content root: {{localFolders.content-root.path}}",
+        },
+      }],
       localFolders: [{
         folderKey: "content-root",
         displayName: "Content root",
@@ -542,6 +549,9 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
       relativePath: "created.txt",
       contents: "nope",
     })).rejects.toMatchObject({ status: 403 });
+    await expect(services.agents.managedReconcile({ companyId, agentKey: "path-aware" }))
+      .rejects.toMatchObject({ status: 403 });
+    expect(await db.select().from(agents)).toHaveLength(1);
     await expect(fs.readFile(path.join(outside, "secret.txt"), "utf8")).resolves.toBe("host-secret");
     await expect(fs.stat(path.join(outside, "created.txt"))).rejects.toMatchObject({ code: "ENOENT" });
 
