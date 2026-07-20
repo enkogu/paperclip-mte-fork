@@ -55,6 +55,16 @@ describe("plugin config validation resource limits", () => {
       });
   });
 
+  it("fails closed when Ajv rejects a malformed schema", () => {
+    expect(validateInstanceConfig({ enabled: true }, { type: 42 })).toEqual({
+      valid: false,
+      errors: [{
+        field: "/",
+        message: "Configuration could not be validated.",
+      }],
+    });
+  });
+
   it("returns only the first ordinary validation error", () => {
     const result = validateInstanceConfig(
       { primary: 1, secondary: 2 },
