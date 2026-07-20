@@ -1,0 +1,35 @@
+name: CodeQL
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+
+# CodeQL needs only the source checkout and permission to upload its SARIF
+# results. JavaScript/TypeScript is interpreted, so no dependency install or
+# custom build step is needed.
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: Analyze JavaScript and TypeScript
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
+        with:
+          languages: javascript-typescript
+          build-mode: none
+
+      - name: Analyze and upload results
+        uses: github/codeql-action/analyze@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
