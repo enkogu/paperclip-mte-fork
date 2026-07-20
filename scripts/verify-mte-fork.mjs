@@ -156,7 +156,15 @@ assert.doesNotMatch(daytonaBuildLock, /^  protobufjs@(?:8\.[0-3]\.|8\.4\.0:)/m);
 
 assert.deepEqual(
   Object.fromEntries(
-    ["fast-uri", "form-data", "hono", "path-to-regexp", "ws"].map((name) => [
+    [
+      "fast-uri",
+      "form-data",
+      "hono",
+      "path-to-regexp",
+      "picomatch",
+      "undici",
+      "ws",
+    ].map((name) => [
       name,
       rootPackage.pnpm?.overrides?.[name],
     ]),
@@ -166,6 +174,8 @@ assert.deepEqual(
     "form-data": "4.0.6",
     hono: "4.12.25",
     "path-to-regexp": "8.4.0",
+    picomatch: "4.0.4",
+    undici: "7.28.0",
     ws: "8.21.1",
   },
   "root runtime security overrides must remain exact and lockfile-auditable",
@@ -175,6 +185,10 @@ for (const vulnerable of [
   /^  form-data@4\.0\.[0-5]:$/m,
   /^  hono@4\.12\.(?:[0-9]|1[0-9]|2[0-4]):$/m,
   /^  path-to-regexp@8\.[0-3]\./m,
+  /^  picomatch@4\.0\.[0-3]:$/m,
+  /^  vite@6\.4\.[0-2]:$/m,
+  /^  vite@(?:7\.[0-2]\.\d+|7\.3\.[0-4]):$/m,
+  /^  undici@7\.(?:[0-9]|1[0-9]|2[0-7])\.\d+:$/m,
   /^  ws@8\.(?:[0-9]|1[0-9]|20)\./m,
 ]) {
   assert.doesNotMatch(rootLock, vulnerable, `root lock retains vulnerable runtime package: ${vulnerable}`);
