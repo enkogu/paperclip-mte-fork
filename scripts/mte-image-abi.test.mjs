@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -37,6 +37,11 @@ async function fixture() {
   await writePackage(root, "plugins/daytona/local/plugin-sdk/node_modules/@paperclipai/shared", {
     name: "@paperclipai/shared",
   });
+  await mkdir(path.join(root, "server/node_modules/@paperclipai"), { recursive: true });
+  await symlink(
+    "../../../plugins/daytona",
+    path.join(root, "server/node_modules/@paperclipai/plugin-daytona"),
+  );
   await writePackage(root, "server/node_modules/@paperclipai/adapter-pi-local", { name: "@paperclipai/adapter-pi-local" });
   await writePackage(root, "server/node_modules/@aws-sdk/client-s3", { name: "@aws-sdk/client-s3" });
   return root;
@@ -64,6 +69,18 @@ test("image ABI verifier fails when a discoverable package path is absent", asyn
   const root = await fixture();
   try {
     await rm(path.join(root, "plugins/daytona/node_modules/@daytonaio/sdk"), { recursive: true, force: true });
+    const result = run(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /ABI package manifest is missing/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("image ABI verifier rejects a missing server-side Daytona resolver", async () => {
+  const root = await fixture();
+  try {
+    await rm(path.join(root, "server/node_modules/@paperclipai/plugin-daytona"), { force: true });
     const result = run(root);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /ABI package manifest is missing/);

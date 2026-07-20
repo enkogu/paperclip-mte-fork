@@ -42,17 +42,24 @@ copy_line = "  && cp -R /tmp/mte-daytona-build/package.json /tmp/mte-daytona-bui
 shared_link = """  && mkdir -p /opt/runtime/plugins/daytona/local/plugin-sdk/node_modules/@paperclipai \\
   && ln -s ../../../shared /opt/runtime/plugins/daytona/local/plugin-sdk/node_modules/@paperclipai/shared \\
 """
-after = before.replace(copy_line, copy_line + shared_link, 1)
-if after == before:
+server_resolver_link = """  && mkdir -p /opt/runtime/server/node_modules/@paperclipai \\
+  && ln -s ../../../plugins/daytona /opt/runtime/server/node_modules/@paperclipai/plugin-daytona \\
+"""
+with_shared_link = before.replace(copy_line, copy_line + shared_link, 1)
+after = with_shared_link.replace(shared_link, shared_link + server_resolver_link, 1)
+if with_shared_link == before or after == with_shared_link:
     raise SystemExit("MTE image ABI patch definition is invalid")
 
 if after in source:
-    print("Dockerfile.mte isolated Daytona image-build patch already applied")
+    print("Dockerfile.mte isolated Daytona image-build and server resolver patch already applied")
+elif with_shared_link in source:
+    dockerfile.write_text(source.replace(with_shared_link, after, 1))
+    print("Applied Daytona server resolver link to Dockerfile.mte")
 elif before in source:
     dockerfile.write_text(source.replace(before, after, 1))
-    print("Applied Dockerfile.mte isolated Daytona image-build patch")
+    print("Applied Dockerfile.mte isolated Daytona image-build and server resolver patch")
 elif legacy in source:
     dockerfile.write_text(source.replace(legacy, after, 1))
-    print("Applied Dockerfile.mte isolated Daytona image-build patch from legacy preimage")
+    print("Applied Dockerfile.mte isolated Daytona image-build and server resolver patch from legacy preimage")
 else:
     raise SystemExit("Dockerfile.mte does not match the reviewed image ABI preimage")
