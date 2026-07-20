@@ -18,6 +18,50 @@ export interface ConfigValidationResult {
 }
 
 /**
+ * Keep plugin-provided JSON and schemas within the amount of work a config
+ * request may ask the API to perform. JSON received over HTTP cannot contain
+ * cycles, but the repeat check also makes this helper safe for direct callers.
+ */
+export const PLUGIN_CONFIG_MAX_DEPTH = 32;
+export const PLUGIN_CONFIG_MAX_NODES = 10_000;
+
+const COMPLEX_CONFIG_ERROR = {
+  field: "/",
+  message: "Configuration exceeds the maximum supported depth or size.",
+};
+
+function isWithinJsonBudget(value: unknown): boolean {
+  const stack: { value: unknown; depth: number }[] = [{ value, depth: 0 }];
+  const visited = new WeakSet<object>();
+  let nodes = 0;
+
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    nodes += 1;
+    if (nodes > PLUGIN_CONFIG_MAX_NODES || current.depth > PLUGIN_CONFIG_MAX_DEPTH) {
+      return false;
+    }
+
+    if (current.value === null || typeof current.value !== "object") {
+      continue;
+    }
+    if (visited.has(current.value)) {
+      return false;
+    }
+    visited.add(current.value);
+
+    const children = Array.isArray(current.value)
+      ? current.value
+      : Object.values(current.value);
+    for (const child of children) {
+      stack.push({ value: child, depth: current.depth + 1 });
+    }
+  }
+
+  return true;
+}
+
+/**
  * Validate a config object against a JSON Schema.
  *
  * @param configJson - The configuration values to validate.
@@ -28,9 +72,13 @@ export function validateInstanceConfig(
   configJson: Record<string, unknown>,
   schema: JsonSchema,
 ): ConfigValidationResult {
+  if (!isWithinJsonBudget(configJson) || !isWithinJsonBudget(schema)) {
+    return { valid: false, errors: [COMPLEX_CONFIG_ERROR] };
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const AjvCtor = (Ajv as any).default ?? Ajv;
-  const ajv = new AjvCtor({ allErrors: true });
+  const ajv = new AjvCtor({ allErrors: false });
   // ajv-formats v3 default export is a FormatsPlugin object; call it as a plugin.
   const applyFormats = (addFormats as any).default ?? addFormats;
   applyFormats(ajv);
@@ -45,7 +93,7 @@ export function validateInstanceConfig(
     return { valid: true };
   }
 
-  const errors = (validate.errors ?? []).map((err: ErrorObject) => ({
+  const errors = (validate.errors ?? []).slice(0, 1).map((err: ErrorObject) => ({
     field: err.instancePath || "/",
     message: err.message ?? "validation failed",
   }));
