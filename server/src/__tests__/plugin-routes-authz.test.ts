@@ -1,6 +1,8 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import path from "node:path";
+import os from "node:os";
 
 const mockRegistry = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -479,6 +481,72 @@ describe.sequential("plugin local folder routes", () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toContain("Local folder key is not declared");
     expect(mockRegistry.upsertCompanySettings).not.toHaveBeenCalled();
+  });
+
+  it.each(["/", "/etc"])(
+    "rejects non-admin configuration of arbitrary host root %s without persistence or folder status exposure",
+    async (configuredPath) => {
+      readyLocalFolderPlugin();
+      const { app } = await createApp(boardActor());
+
+      const validate = await request(app)
+        .post(`/api/plugins/${pluginId}/companies/${companyA}/local-folders/content-root/validate`)
+        .send({ path: configuredPath });
+      const save = await request(app)
+        .put(`/api/plugins/${pluginId}/companies/${companyA}/local-folders/content-root`)
+        .send({ path: configuredPath });
+
+      expect(validate.status).toBe(403);
+      expect(validate.body).not.toHaveProperty("readable");
+      expect(validate.body).not.toHaveProperty("writable");
+      expect(save.status).toBe(403);
+      expect(mockRegistry.getCompanySettings).not.toHaveBeenCalled();
+      expect(mockRegistry.upsertCompanySettings).not.toHaveBeenCalled();
+    },
+  );
+
+  it("allows a non-admin board member to configure a path under the scoped plugin data root", async () => {
+    readyLocalFolderPlugin();
+    const { app } = await createApp(boardActor());
+    const configuredPath = path.join(
+      os.homedir(),
+      ".paperclip",
+      "plugin-data",
+      companyA,
+      "paperclip.example",
+      "content",
+    );
+
+    const res = await request(app)
+      .put(`/api/plugins/${pluginId}/companies/${companyA}/local-folders/content-root`)
+      .send({ path: configuredPath });
+
+    expect(res.status).toBe(200);
+    expect(mockRegistry.upsertCompanySettings).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves instance-admin configuration of an arbitrary absolute host path", async () => {
+    readyLocalFolderPlugin();
+    const { app } = await createApp(boardActor({ isInstanceAdmin: true }));
+
+    const res = await request(app)
+      .put(`/api/plugins/${pluginId}/companies/${companyA}/local-folders/content-root`)
+      .send({ path: path.join(os.tmpdir(), "paperclip-admin-local-folder-missing") });
+
+    expect(res.status).toBe(200);
+    expect(mockRegistry.upsertCompanySettings).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves local-implicit operator configuration of an arbitrary absolute host path", async () => {
+    readyLocalFolderPlugin();
+    const { app } = await createApp(boardActor({ source: "local_implicit", companyIds: [] }));
+
+    const res = await request(app)
+      .put(`/api/plugins/${pluginId}/companies/${companyA}/local-folders/content-root`)
+      .send({ path: path.join(os.tmpdir(), "paperclip-local-implicit-folder-missing") });
+
+    expect(res.status).toBe(200);
+    expect(mockRegistry.upsertCompanySettings).toHaveBeenCalledTimes(1);
   });
 });
 
