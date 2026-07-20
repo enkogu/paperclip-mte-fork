@@ -93,6 +93,114 @@ const MIME_TYPES: Record<string, string> = {
 // Helper
 // ---------------------------------------------------------------------------
 
+function isPathContained(rootPath: string, candidatePath: string): boolean {
+  const relative = path.relative(rootPath, candidatePath);
+  return relative === "" || (
+    relative !== ".."
+    && !relative.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relative)
+  );
+}
+
+function decodeRequestedPath(rawFilePath: string): string | null {
+  let decoded = rawFilePath;
+
+  // Express decodes route parameters once. Decode repeatedly so both direct
+  // callers and encoded/double-encoded traversal receive the same treatment.
+  for (let iteration = 0; iteration < 5; iteration += 1) {
+    let next: string;
+    try {
+      next = decodeURIComponent(decoded);
+    } catch {
+      return null;
+    }
+    if (next === decoded) break;
+    decoded = next;
+    if (iteration === 4) return null;
+  }
+
+  if (decoded.includes("\0")) return null;
+
+  const normalized = decoded.replaceAll("\\", "/");
+  const segments = normalized.split("/");
+  if (segments.some((segment) => segment === "..")) return null;
+
+  return segments.filter((segment) => segment !== "" && segment !== ".").join(path.sep);
+}
+
+export type PluginUiFileResolution =
+  | { ok: true; filePath: string }
+  | { ok: false; reason: "denied" | "missing" };
+
+/**
+ * Resolve a requested UI asset only after lexical and realpath containment.
+ * No file stat or content read occurs until this function returns `ok: true`.
+ */
+export function resolveContainedPluginUiFile(
+  uiDir: string,
+  rawFilePath: string,
+): PluginUiFileResolution {
+  const decodedFilePath = decodeRequestedPath(rawFilePath);
+  if (decodedFilePath === null || decodedFilePath.length === 0) {
+    return { ok: false, reason: "denied" };
+  }
+
+  let realUiDir: string;
+  try {
+    realUiDir = fs.realpathSync(uiDir);
+  } catch {
+    return { ok: false, reason: "missing" };
+  }
+
+  const candidatePath = path.resolve(realUiDir, decodedFilePath);
+  if (!isPathContained(realUiDir, candidatePath)) {
+    return { ok: false, reason: "denied" };
+  }
+
+  let realFilePath: string;
+  try {
+    realFilePath = fs.realpathSync(candidatePath);
+  } catch {
+    return { ok: false, reason: "missing" };
+  }
+
+  if (!isPathContained(realUiDir, realFilePath)) {
+    return { ok: false, reason: "denied" };
+  }
+
+  return { ok: true, filePath: realFilePath };
+}
+
+function resolveUiDirFromPackageRoot(
+  packageRoot: string,
+  entrypointsUi: string,
+): string | null {
+  let realPackageRoot: string;
+  try {
+    realPackageRoot = fs.realpathSync(packageRoot);
+  } catch {
+    return null;
+  }
+
+  const candidateUiDir = path.resolve(realPackageRoot, entrypointsUi);
+  if (!isPathContained(realPackageRoot, candidateUiDir)) return null;
+
+  let realUiDir: string;
+  try {
+    realUiDir = fs.realpathSync(candidateUiDir);
+  } catch {
+    return null;
+  }
+
+  if (!isPathContained(realPackageRoot, realUiDir)) return null;
+
+  try {
+    return fs.statSync(realUiDir).isDirectory() ? realUiDir : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Resolve a plugin's UI directory from its package location.
  *
@@ -114,16 +222,11 @@ export function resolvePluginUiDir(
 ): string | null {
   // For local-path installs, prefer the persisted package path.
   if (packagePath) {
-    const resolvedPackagePath = path.resolve(packagePath);
-    if (fs.existsSync(resolvedPackagePath)) {
-      const uiDirFromPackagePath = path.resolve(resolvedPackagePath, entrypointsUi);
-      if (
-        uiDirFromPackagePath.startsWith(resolvedPackagePath)
-        && fs.existsSync(uiDirFromPackagePath)
-      ) {
-        return uiDirFromPackagePath;
-      }
-    }
+    const uiDirFromPackagePath = resolveUiDirFromPackageRoot(
+      path.resolve(packagePath),
+      entrypointsUi,
+    );
+    if (uiDirFromPackagePath) return uiDirFromPackagePath;
   }
 
   // Resolve the package root within the local plugin directory's node_modules.
@@ -151,15 +254,7 @@ export function resolvePluginUiDir(
     }
   }
 
-  // Resolve the UI directory relative to the package root
-  const uiDir = path.resolve(packageRoot, entrypointsUi);
-
-  // Verify the resolved UI directory exists and is actually inside the package
-  if (!fs.existsSync(uiDir)) {
-    return null;
-  }
-
-  return uiDir;
+  return resolveUiDirFromPackageRoot(packageRoot, entrypointsUi);
 }
 
 /**
@@ -407,33 +502,26 @@ export function pluginUiStaticRoutes(db: Db, options: PluginUiStaticRouteOptions
       return;
     }
 
-    // Step 4: Resolve the requested file path and prevent traversal (including symlinks)
-    const resolvedFilePath = path.resolve(uiDir, rawFilePath);
+    // Step 4: Resolve the requested file path and prevent traversal (including symlinks).
+    // Containment is established before any stat or content read of the file.
+    const fileResolution = resolveContainedPluginUiFile(uiDir, rawFilePath);
+    if (!fileResolution.ok && fileResolution.reason === "denied") {
+      res.status(403).json({ error: "Access denied" });
+      return;
+    }
+    if (!fileResolution.ok) {
+      res.status(404).json({ error: "File not found" });
+      return;
+    }
 
-    // Step 5: Check that the file exists and is a regular file
+    const resolvedFilePath = fileResolution.filePath;
+
+    // Step 5: Check that the contained target is a regular file.
     let fileStat: fs.Stats;
     try {
       fileStat = fs.statSync(resolvedFilePath);
     } catch {
       res.status(404).json({ error: "File not found" });
-      return;
-    }
-
-    // Security: resolve symlinks via realpathSync and verify containment.
-    // This prevents symlink-based traversal that string-based startsWith misses.
-    let realFilePath: string;
-    let realUiDir: string;
-    try {
-      realFilePath = fs.realpathSync(resolvedFilePath);
-      realUiDir = fs.realpathSync(uiDir);
-    } catch {
-      res.status(404).json({ error: "File not found" });
-      return;
-    }
-
-    const relative = path.relative(realUiDir, realFilePath);
-    if (relative.startsWith("..") || path.isAbsolute(relative)) {
-      res.status(403).json({ error: "Access denied" });
       return;
     }
 

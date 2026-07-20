@@ -1,4 +1,4 @@
-import { createReadStream, existsSync, statSync, watch } from "node:fs";
+import { createReadStream, existsSync, realpathSync, statSync, watch } from "node:fs";
 import { mkdir, readdir, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -33,15 +33,72 @@ function contentType(filePath: string): string {
   return "application/octet-stream";
 }
 
-function normalizeFilePath(baseDir: string, reqPath: string): string {
-  const pathname = reqPath.split("?")[0] || "/";
-  const resolved = pathname === "/" ? "/index.js" : pathname;
-  const absolute = path.resolve(baseDir, `.${resolved}`);
-  const normalizedBase = `${path.resolve(baseDir)}${path.sep}`;
-  if (!absolute.startsWith(normalizedBase) && absolute !== path.resolve(baseDir)) {
-    throw new Error("path traversal blocked");
+function isPathContained(rootPath: string, candidatePath: string): boolean {
+  const relative = path.relative(rootPath, candidatePath);
+  return relative === "" || (
+    relative !== ".."
+    && !relative.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relative)
+  );
+}
+
+function decodeRequestedPath(reqPath: string): string | null {
+  const queryIndex = reqPath.indexOf("?");
+  let decoded = queryIndex === -1 ? reqPath : reqPath.slice(0, queryIndex);
+
+  for (let iteration = 0; iteration < 5; iteration += 1) {
+    let next: string;
+    try {
+      next = decodeURIComponent(decoded);
+    } catch {
+      return null;
+    }
+    if (next === decoded) break;
+    decoded = next;
+    if (iteration === 4) return null;
   }
-  return absolute;
+
+  if (decoded.includes("\0")) return null;
+
+  const normalized = decoded.replaceAll("\\", "/");
+  const segments = normalized.split("/");
+  if (segments.some((segment) => segment === "..")) return null;
+
+  const relativePath = segments
+    .filter((segment) => segment !== "" && segment !== ".")
+    .join(path.sep);
+  return relativePath || "index.js";
+}
+
+export type DevServerFileResolution =
+  | { ok: true; filePath: string }
+  | { ok: false; reason: "denied" | "missing" };
+
+/** Resolve a static asset without statting or reading it before containment. */
+export function resolveContainedDevServerFile(
+  realUiDir: string,
+  reqPath: string,
+): DevServerFileResolution {
+  const relativePath = decodeRequestedPath(reqPath);
+  if (relativePath === null) return { ok: false, reason: "denied" };
+
+  const candidatePath = path.resolve(realUiDir, relativePath);
+  if (!isPathContained(realUiDir, candidatePath)) {
+    return { ok: false, reason: "denied" };
+  }
+
+  let realFilePath: string;
+  try {
+    realFilePath = realpathSync(candidatePath);
+  } catch {
+    return { ok: false, reason: "missing" };
+  }
+
+  if (!isPathContained(realUiDir, realFilePath)) {
+    return { ok: false, reason: "denied" };
+  }
+
+  return { ok: true, filePath: realFilePath };
 }
 
 function send404(res: ServerResponse) {
@@ -56,9 +113,36 @@ function sendJson(res: ServerResponse, value: unknown) {
   res.end(JSON.stringify(value));
 }
 
-async function ensureUiDir(uiDir: string): Promise<void> {
-  if (existsSync(uiDir)) return;
+async function ensureContainedUiDir(rootDir: string, uiDir: string): Promise<string> {
+  let existingAncestor = uiDir;
+  while (true) {
+    try {
+      const realAncestor = realpathSync(existingAncestor);
+      if (!isPathContained(rootDir, realAncestor)) {
+        throw new Error("UI directory must stay within the plugin root");
+      }
+      break;
+    } catch (error) {
+      if (
+        error instanceof Error
+        && "code" in error
+        && (error as NodeJS.ErrnoException).code === "ENOENT"
+      ) {
+        const parent = path.dirname(existingAncestor);
+        if (parent === existingAncestor) throw error;
+        existingAncestor = parent;
+        continue;
+      }
+      throw error;
+    }
+  }
+
   await mkdir(uiDir, { recursive: true });
+  const realUiDir = realpathSync(uiDir);
+  if (!isPathContained(rootDir, realUiDir)) {
+    throw new Error("UI directory must stay within the plugin root");
+  }
+  return realUiDir;
 }
 
 async function listFilesRecursive(dir: string): Promise<string[]> {
@@ -125,12 +209,17 @@ async function startUiWatcher(uiDir: string, onReload: (filePath: string) => voi
  * - Any other path serves files from the configured UI build directory
  */
 export async function startPluginDevServer(options: PluginDevServerOptions = {}): Promise<PluginDevServer> {
-  const rootDir = path.resolve(options.rootDir ?? process.cwd());
-  const uiDir = path.resolve(rootDir, options.uiDir ?? "dist/ui");
+  const configuredRootDir = path.resolve(options.rootDir ?? process.cwd());
+  const rootDir = realpathSync(configuredRootDir);
+  const configuredUiDir = path.resolve(rootDir, options.uiDir ?? "dist/ui");
+  if (!isPathContained(rootDir, configuredUiDir)) {
+    throw new Error("UI directory must stay within the plugin root");
+  }
+
+  const uiDir = await ensureContainedUiDir(rootDir, configuredUiDir);
+
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 4177;
-
-  await ensureUiDir(uiDir);
 
   const sseClients = new Set<ServerResponse>();
 
@@ -157,8 +246,14 @@ export async function startPluginDevServer(options: PluginDevServerOptions = {})
     }
 
     try {
-      const filePath = normalizeFilePath(uiDir, url);
-      if (!existsSync(filePath) || !statSync(filePath).isFile()) {
+      const fileResolution = resolveContainedDevServerFile(uiDir, url);
+      if (!fileResolution.ok) {
+        send404(res);
+        return;
+      }
+
+      const filePath = fileResolution.filePath;
+      if (!statSync(filePath).isFile()) {
         send404(res);
         return;
       }
