@@ -30,6 +30,11 @@ const COMPLEX_CONFIG_ERROR = {
   message: "Configuration exceeds the maximum supported depth or size.",
 };
 
+const VALIDATION_FAILURE_ERROR = {
+  field: "/",
+  message: "Configuration could not be validated.",
+};
+
 function isWithinJsonBudget(value: unknown): boolean {
   const stack: { value: unknown; depth: number }[] = [{ value, depth: 0 }];
   const visited = new WeakSet<object>();
@@ -76,27 +81,31 @@ export function validateInstanceConfig(
     return { valid: false, errors: [COMPLEX_CONFIG_ERROR] };
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const AjvCtor = (Ajv as any).default ?? Ajv;
-  const ajv = new AjvCtor({ allErrors: false });
-  // ajv-formats v3 default export is a FormatsPlugin object; call it as a plugin.
-  const applyFormats = (addFormats as any).default ?? addFormats;
-  applyFormats(ajv);
-  // Register the secret-ref format used by plugin manifests to mark fields that
-  // hold a Paperclip secret UUID rather than a raw value. The format is a UI
-  // hint only — UUID validation happens in the secrets handler at resolve time.
-  ajv.addFormat("secret-ref", { validate: () => true });
-  const validate = ajv.compile(schema);
-  const valid = validate(configJson);
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const AjvCtor = (Ajv as any).default ?? Ajv;
+    const ajv = new AjvCtor({ allErrors: false });
+    // ajv-formats v3 default export is a FormatsPlugin object; call it as a plugin.
+    const applyFormats = (addFormats as any).default ?? addFormats;
+    applyFormats(ajv);
+    // Register the secret-ref format used by plugin manifests to mark fields that
+    // hold a Paperclip secret UUID rather than a raw value. The format is a UI
+    // hint only — UUID validation happens in the secrets handler at resolve time.
+    ajv.addFormat("secret-ref", { validate: () => true });
+    const validate = ajv.compile(schema);
+    const valid = validate(configJson);
 
-  if (valid) {
-    return { valid: true };
+    if (valid) {
+      return { valid: true };
+    }
+
+    const errors = (validate.errors ?? []).slice(0, 1).map((err: ErrorObject) => ({
+      field: err.instancePath || "/",
+      message: err.message ?? "validation failed",
+    }));
+
+    return { valid: false, errors };
+  } catch {
+    return { valid: false, errors: [VALIDATION_FAILURE_ERROR] };
   }
-
-  const errors = (validate.errors ?? []).slice(0, 1).map((err: ErrorObject) => ({
-    field: err.instancePath || "/",
-    message: err.message ?? "validation failed",
-  }));
-
-  return { valid: false, errors };
 }
