@@ -11,6 +11,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import type { ServerAdapterModule } from "./types.js";
 import { logger } from "../middleware/logger.js";
 
@@ -43,7 +44,8 @@ export function getOrExtractUiParserSource(adapterType: string): string | undefi
   if (!record) return undefined;
 
   const packageDir = resolvePackageDir(record);
-  const source = extractUiParserSource(packageDir, record.packageName);
+  const pkg = readAdapterPackage(packageDir);
+  const source = extractUiParserSource(pkg, record.packageName);
   if (source) {
     uiParserCache.set(adapterType, source);
     logger.info(
@@ -58,21 +60,94 @@ export function getOrExtractUiParserSource(adapterType: string): string | undefi
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-function resolvePackageDir(record: Pick<AdapterPluginRecord, "localPath" | "packageName">): string {
-  return record.localPath
-    ? path.resolve(record.localPath)
-    : path.resolve(getAdapterPluginsDir(), "node_modules", record.packageName);
+const NPM_PACKAGE_NAME_PATTERN = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
+
+export function isValidAdapterPackageName(packageName: string): boolean {
+  return packageName.length > 0
+    && packageName.length <= 214
+    && NPM_PACKAGE_NAME_PATTERN.test(packageName);
 }
 
-function resolvePackageEntryPoint(packageDir: string): string {
-  const pkgJsonPath = path.join(packageDir, "package.json");
-  const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, "utf-8"));
-
-  if (pkg.exports && typeof pkg.exports === "object" && pkg.exports["."]) {
-    const exp = pkg.exports["."];
-    return typeof exp === "string" ? exp : (exp.import ?? exp.default ?? "index.js");
+function resolvePackageDir(record: Pick<AdapterPluginRecord, "localPath" | "packageName">): string {
+  if (record.localPath) return path.resolve(record.localPath);
+  if (!isValidAdapterPackageName(record.packageName)) {
+    throw new Error(`Invalid adapter npm package name: "${record.packageName}".`);
   }
-  return pkg.main ?? "index.js";
+  return path.resolve(getAdapterPluginsDir(), "node_modules", record.packageName);
+}
+
+interface AdapterPackageManifest {
+  main?: unknown;
+  exports?: unknown;
+  paperclip?: { adapterUiParser?: unknown };
+}
+
+interface AdapterPackage {
+  root: string;
+  manifest: AdapterPackageManifest;
+}
+
+function isContainedPath(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+function readAdapterPackage(packageDir: string): AdapterPackage {
+  const root = fs.realpathSync(packageDir);
+  if (!fs.statSync(root).isDirectory()) {
+    throw new Error(`Adapter package root is not a directory: "${packageDir}".`);
+  }
+
+  const packageJsonPath = fs.realpathSync(path.join(root, "package.json"));
+  if (!isContainedPath(root, packageJsonPath) || !fs.statSync(packageJsonPath).isFile()) {
+    throw new Error("Adapter package.json must be a file inside the package root.");
+  }
+
+  const parsed = JSON.parse(fs.readFileSync(packageJsonPath, "utf-8")) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Adapter package.json must contain a JSON object.");
+  }
+  return { root, manifest: parsed as AdapterPackageManifest };
+}
+
+function resolveExportTarget(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const conditions = value as Record<string, unknown>;
+  return resolveExportTarget(conditions.import)
+    ?? resolveExportTarget(conditions.node)
+    ?? resolveExportTarget(conditions.default);
+}
+
+function resolveContainedPackageFile(packageRoot: string, target: string, label: string): string {
+  if (path.isAbsolute(target) || path.win32.isAbsolute(target)) {
+    throw new Error(`${label} must be a relative path inside the adapter package.`);
+  }
+
+  const unresolvedPath = path.resolve(packageRoot, target);
+  if (!isContainedPath(packageRoot, unresolvedPath)) {
+    throw new Error(`${label} escapes the adapter package root.`);
+  }
+
+  const realPath = fs.realpathSync(unresolvedPath);
+  if (!isContainedPath(packageRoot, realPath) || !fs.statSync(realPath).isFile()) {
+    throw new Error(`${label} must resolve to a file inside the adapter package root.`);
+  }
+  return realPath;
+}
+
+function resolvePackageEntryPoint(pkg: AdapterPackage): string {
+  const exportsField = pkg.manifest.exports;
+  const rootExport = exportsField && typeof exportsField === "object" && !Array.isArray(exportsField)
+    ? (exportsField as Record<string, unknown>)["."]
+    : undefined;
+  const entryPoint = resolveExportTarget(rootExport)
+    ?? (typeof pkg.manifest.main === "string" ? pkg.manifest.main : undefined);
+
+  if (!entryPoint) {
+    throw new Error("Adapter package.json must declare a main entry or exports['.'] target.");
+  }
+  return resolveContainedPackageFile(pkg.root, entryPoint, "Adapter package entry point");
 }
 
 // ---------------------------------------------------------------------------
@@ -82,18 +157,18 @@ function resolvePackageEntryPoint(packageDir: string): string {
 const SUPPORTED_PARSER_CONTRACT = "1";
 
 function extractUiParserSource(
-  packageDir: string,
+  pkg: AdapterPackage,
   packageName: string,
 ): string | undefined {
-  const pkgJsonPath = path.join(packageDir, "package.json");
-  const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, "utf-8"));
-
-  if (!pkg.exports || typeof pkg.exports !== "object" || !pkg.exports["./ui-parser"]) {
+  const exportsField = pkg.manifest.exports;
+  if (!exportsField || typeof exportsField !== "object" || Array.isArray(exportsField)) {
     return undefined;
   }
+  const uiParserExp = (exportsField as Record<string, unknown>)["./ui-parser"];
+  if (uiParserExp === undefined) return undefined;
 
-  const contractVersion = pkg.paperclip?.adapterUiParser;
-  if (contractVersion) {
+  const contractVersion = pkg.manifest.paperclip?.adapterUiParser;
+  if (typeof contractVersion === "string" && contractVersion) {
     const major = contractVersion.split(".")[0];
     if (major !== SUPPORTED_PARSER_CONTRACT) {
       logger.warn(
@@ -109,23 +184,11 @@ function extractUiParserSource(
     );
   }
 
-  const uiParserExp = pkg.exports["./ui-parser"];
-  const uiParserFile = typeof uiParserExp === "string"
-    ? uiParserExp
-    : (uiParserExp.import ?? uiParserExp.default);
-  const uiParserPath = path.resolve(packageDir, uiParserFile);
-
-  if (!uiParserPath.startsWith(packageDir + path.sep) && uiParserPath !== packageDir) {
-    logger.warn(
-      { packageName, uiParserFile },
-      "UI parser path escapes package directory — skipping",
-    );
-    return undefined;
+  const uiParserFile = resolveExportTarget(uiParserExp);
+  if (!uiParserFile) {
+    throw new Error("Adapter exports['./ui-parser'] must declare an import, node, or default file target.");
   }
-
-  if (!fs.existsSync(uiParserPath)) {
-    return undefined;
-  }
+  const uiParserPath = resolveContainedPackageFile(pkg.root, uiParserFile, "Adapter UI parser export");
 
   try {
     const source = fs.readFileSync(uiParserPath, "utf-8");
@@ -167,17 +230,20 @@ export async function loadExternalAdapterPackage(
   packageName: string,
   localPath?: string,
 ): Promise<ServerAdapterModule> {
+  if (!localPath && !isValidAdapterPackageName(packageName)) {
+    throw new Error(`Invalid adapter npm package name: "${packageName}".`);
+  }
   const packageDir = localPath
     ? path.resolve(localPath)
     : path.resolve(getAdapterPluginsDir(), "node_modules", packageName);
 
-  const entryPoint = resolvePackageEntryPoint(packageDir);
-  const modulePath = path.resolve(packageDir, entryPoint);
-  const uiParserSource = extractUiParserSource(packageDir, packageName);
+  const pkg = readAdapterPackage(packageDir);
+  const modulePath = resolvePackageEntryPoint(pkg);
+  const uiParserSource = extractUiParserSource(pkg, packageName);
 
-  logger.info({ packageName, packageDir, entryPoint, modulePath, hasUiParser: !!uiParserSource }, "Loading external adapter package");
+  logger.info({ packageName, packageDir: pkg.root, modulePath, hasUiParser: !!uiParserSource }, "Loading external adapter package");
 
-  const mod = await import(modulePath);
+  const mod = await import(pathToFileURL(modulePath).href);
   const adapterModule = validateAdapterModule(mod, packageName);
 
   if (uiParserSource) {
@@ -210,9 +276,9 @@ export async function reloadExternalAdapter(
   if (!record) return null;
 
   const packageDir = resolvePackageDir(record);
-  const entryPoint = resolvePackageEntryPoint(packageDir);
-  const modulePath = path.resolve(packageDir, entryPoint);
-  const fileUrl = `file://${modulePath}`;
+  const pkg = readAdapterPackage(packageDir);
+  const modulePath = resolvePackageEntryPoint(pkg);
+  const fileUrl = pathToFileURL(modulePath).href;
 
   // Bust ESM module cache so re-import loads fresh code from disk.
   // Query-string trick (?t=...) works in Node; Bun may need the file:// URL
@@ -239,7 +305,7 @@ export async function reloadExternalAdapter(
   const adapterModule = validateAdapterModule(mod, record.packageName);
 
   uiParserCache.delete(type);
-  const uiParserSource = extractUiParserSource(packageDir, record.packageName);
+  const uiParserSource = extractUiParserSource(pkg, record.packageName);
   if (uiParserSource) {
     uiParserCache.set(adapterModule.type, uiParserSource);
   }

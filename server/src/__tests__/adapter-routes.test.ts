@@ -19,6 +19,7 @@ const mockPluginLoader = vi.hoisted(() => ({
   loadExternalAdapterPackage: vi.fn(),
   getUiParserSource: vi.fn(),
   getOrExtractUiParserSource: vi.fn(),
+  isValidAdapterPackageName: vi.fn((packageName: string) => /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/.test(packageName)),
   reloadExternalAdapter: vi.fn(),
 }));
 
@@ -422,5 +423,20 @@ describe("adapter routes", () => {
     unregisterServerAdapter("codex_local");
     expect(findServerAdapter("codex_local")).toBe(builtin);
     setOverridePaused("codex_local", false);
+  });
+
+  it.each([
+    ["../adapter", undefined, "packageName"],
+    ["adapter", "../latest", "version"],
+    ["adapter", "/tmp/version", "version"],
+  ])("POST /api/adapters/install rejects unsafe npm %s", async (packageName, version, field) => {
+    const app = createApp({ isInstanceAdmin: true });
+    const res = await request(app)
+      .post("/api/adapters/install")
+      .send({ packageName, version });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(400);
+    expect(res.body.error).toContain(field);
+    expect(mockPluginLoader.loadExternalAdapterPackage).not.toHaveBeenCalled();
   });
 });

@@ -34,6 +34,7 @@ const mocks = vi.hoisted(() => {
     reloadExternalAdapter: vi.fn(),
     getUiParserSource: vi.fn(),
     getOrExtractUiParserSource: vi.fn(),
+    isValidAdapterPackageName: vi.fn((packageName: string) => /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/.test(packageName)),
   };
 });
 
@@ -56,6 +57,7 @@ vi.mock("../adapters/plugin-loader.js", () => ({
   loadExternalAdapterPackage: mocks.loadExternalAdapterPackage,
   getUiParserSource: mocks.getUiParserSource,
   getOrExtractUiParserSource: mocks.getOrExtractUiParserSource,
+  isValidAdapterPackageName: mocks.isValidAdapterPackageName,
   reloadExternalAdapter: mocks.reloadExternalAdapter,
 }));
 
@@ -79,6 +81,7 @@ function registerRouteMocks() {
     loadExternalAdapterPackage: mocks.loadExternalAdapterPackage,
     getUiParserSource: mocks.getUiParserSource,
     getOrExtractUiParserSource: mocks.getOrExtractUiParserSource,
+    isValidAdapterPackageName: mocks.isValidAdapterPackageName,
     reloadExternalAdapter: mocks.reloadExternalAdapter,
   }));
 }

@@ -41,7 +41,7 @@ import {
 } from "../services/adapter-plugin-store.js";
 import type { AdapterPluginRecord } from "../services/adapter-plugin-store.js";
 import type { ServerAdapterModule, AdapterConfigSchema } from "../adapters/types.js";
-import { loadExternalAdapterPackage, getUiParserSource, getOrExtractUiParserSource, reloadExternalAdapter } from "../adapters/plugin-loader.js";
+import { loadExternalAdapterPackage, getUiParserSource, getOrExtractUiParserSource, isValidAdapterPackageName, reloadExternalAdapter } from "../adapters/plugin-loader.js";
 import { logger } from "../middleware/logger.js";
 import { assertBoardOrgAccess, assertInstanceAdmin } from "./authz.js";
 import { BUILTIN_ADAPTER_TYPES } from "../adapters/builtin-adapter-types.js";
@@ -94,6 +94,9 @@ interface AdapterInfo {
  * Resolve the adapter package directory (same rules as plugin-loader).
  */
 function resolveAdapterPackageDir(record: AdapterPluginRecord): string {
+  if (!record.localPath && !isValidAdapterPackageName(record.packageName)) {
+    throw new Error(`Invalid adapter npm package name: "${record.packageName}".`);
+  }
   return record.localPath
     ? path.resolve(record.localPath)
     : path.resolve(getAdapterPluginsDir(), "node_modules", record.packageName);
@@ -169,6 +172,12 @@ async function normalizeLocalPath(rawPath: string): Promise<string> {
   return rawPath;
 }
 
+function isValidAdapterPackageVersion(version: string): boolean {
+  return version.length > 0
+    && version.length <= 128
+    && /^[0-9A-Za-z][0-9A-Za-z._+~-]*$/.test(version);
+}
+
 /**
  * Register an external adapter module into the server registry via the
  * hot-install path, resolving `sessionManagement` identically to how the
@@ -240,15 +249,24 @@ export function adapterRoutes() {
     // e.g. "@henkey/hermes-paperclip-adapter@0.3.0" → packageName + version
     let canonicalName = packageName;
     let explicitVersion = version;
-    const versionSuffix = packageName.match(/@(\d+\.\d+\.\d+.*)$/);
-    if (versionSuffix) {
+    const versionSuffix = !isLocalPath ? packageName.match(/@(\d+\.\d+\.\d+[0-9A-Za-z._+~-]*)$/) : null;
+    if (versionSuffix && !explicitVersion) {
       // For scoped packages: "@scope/name@1.2.3" → "@scope/name" + "1.2.3"
       // For unscoped: "name@1.2.3" → "name" + "1.2.3"
       const lastAtIndex = packageName.lastIndexOf("@");
-      if (lastAtIndex > 0 && !explicitVersion) {
+      if (lastAtIndex > 0) {
         canonicalName = packageName.slice(0, lastAtIndex);
         explicitVersion = versionSuffix[1];
       }
+    }
+
+    if (!isLocalPath && !isValidAdapterPackageName(canonicalName)) {
+      res.status(400).json({ error: "packageName must be a valid npm package name (for example, name or @scope/name)." });
+      return;
+    }
+    if (explicitVersion !== undefined && (typeof explicitVersion !== "string" || !isValidAdapterPackageVersion(explicitVersion))) {
+      res.status(400).json({ error: "version must be a version or dist-tag, not a path or package spec." });
+      return;
     }
 
     try {
@@ -581,6 +599,11 @@ export function adapterRoutes() {
 
     if (record.localPath) {
       res.status(400).json({ error: "Local-path adapters cannot be reinstalled. Use Reload instead." });
+      return;
+    }
+
+    if (!isValidAdapterPackageName(record.packageName)) {
+      res.status(500).json({ error: "Stored adapter package name is invalid; refusing npm reinstall." });
       return;
     }
 
