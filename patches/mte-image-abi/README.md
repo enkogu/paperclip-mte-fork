@@ -9,6 +9,13 @@ dedicated `image-build` workspace and deploy that isolated production closure
 beside the server. Its lock pins `@daytonaio/sdk` at `0.175.0` and resolves the
 locally built plugin SDK and shared packages through `file:` dependencies. The
 root workspace lock and peer policy remain outside this dependency domain.
+The server production deploy is normalized as one complete workspace closure:
+every deployed `@paperclipai/*` package uses its package-specific
+`publishConfig.exports`, `main`, and `types` when available; older manifests
+fall back from `src/*.ts` to their matching built `dist/*.js` output. The
+normalizer rejects missing build outputs, missing internal dependencies, and
+resolution outside the deployed server tree. It does not copy individual
+workspace sources or add a TypeScript runtime loader.
 The deployed server receives closure-internal package links at
 `/app/server/node_modules/@paperclipai/plugin-daytona`, pointing to the same
 verified `/app/plugins/daytona` package, and at
@@ -40,5 +47,10 @@ runtime root and is checked by both the closure verifier and the image ABI test.
 The ABI verifier also loads the real Daytona ESM entrypoint and resolves both
 the plugin and Daytona SDK from the server context, so a missing transitive SDK
 or broken resolver link fails the image build.
+Finally, the production image build launches its actual `node dist/index.js`
+entrypoint as the production `node` user, with an isolated temporary state
+directory, and requires the health
+endpoint to become ready. This catches missing server workspace modules before
+an immutable digest can be published.
 Remove this package and the ABI copy/deploy steps when the official
 Paperclip image exposes equivalent pinned package paths.

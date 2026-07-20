@@ -6,7 +6,7 @@ await import("./verify-mte-gitleaks.mjs");
 
 const root = new URL("../", import.meta.url);
 const read = (file) => readFile(new URL(file, root), "utf8");
-const [dockerfile, notice, buildWorkflow, publishWorkflow, legacyRuntimeWorkflow, heartbeat, recovery, terminalFinalizer, environmentRuntime, runtimePruner, runtimeVerifier, imageAbi, imageAbiVerifier, daytonaPackage, rootWorkspace, daytonaBuildNpmrc, daytonaBuildPackage, daytonaBuildLock] = await Promise.all([
+const [dockerfile, notice, buildWorkflow, publishWorkflow, legacyRuntimeWorkflow, heartbeat, recovery, terminalFinalizer, environmentRuntime, runtimePruner, runtimeVerifier, workspaceNormalizer, serverRuntimeSmoke, imageAbi, imageAbiVerifier, daytonaPackage, rootWorkspace, daytonaBuildNpmrc, daytonaBuildPackage, daytonaBuildLock] = await Promise.all([
   read("Dockerfile.mte"),
   read("NOTICE-MTE.md"),
   read(".github/workflows/mte-image-build.yml"),
@@ -18,6 +18,8 @@ const [dockerfile, notice, buildWorkflow, publishWorkflow, legacyRuntimeWorkflow
   read("server/src/services/environment-runtime.ts"),
   read("scripts/prune-mte-runtime.mjs"),
   read("scripts/verify-mte-runtime.mjs"),
+  read("scripts/normalize-mte-workspace-exports.mjs"),
+  read("scripts/smoke-mte-server-runtime.mjs"),
   read("scripts/mte-image-abi.json"),
   read("scripts/verify-mte-image-abi.mjs"),
   read("packages/plugins/sandbox-providers/daytona/package.json"),
@@ -44,6 +46,9 @@ assert.match(dockerfile, /pnpm --filter @paperclipai\/server deploy --prod \/opt
 assert.match(dockerfile, /pnpm -C \/tmp\/mte-daytona-build install --frozen-lockfile --ignore-scripts/);
 assert.match(dockerfile, /pnpm -C \/tmp\/mte-daytona-build prune --prod --ignore-scripts/);
 assert.doesNotMatch(dockerfile, /--filter @paperclipai\/plugin-daytona(?:\.\.\.)? (?:build|deploy)/);
+assert.match(dockerfile, /node scripts\/normalize-mte-workspace-exports\.mjs \/opt\/runtime\/server/);
+assert.match(dockerfile, /cp scripts\/smoke-mte-server-runtime\.mjs \/opt\/runtime\/image-abi\/smoke-server\.mjs/);
+assert.match(dockerfile, /USER node\n\nRUN node \/app\/image-abi\/smoke-server\.mjs \/app\/server/);
 assert.match(dockerfile, /node scripts\/verify-mte-runtime\.mjs \/opt\/runtime/);
 assert.match(dockerfile, /node \/opt\/runtime\/image-abi\/verify\.mjs \/opt\/runtime/);
 assert.doesNotMatch(dockerfile, /COPY --chown=.*--from=build \/src \/app|COPY --from=build \/src \/app/);
@@ -60,6 +65,7 @@ const mteWorkflows = (await readdir(new URL(".github/workflows/", root)))
   .sort();
 assert.deepEqual(mteWorkflows, ["mte-image-build.yml", "mte-image-publish.yml"]);
 assert.match(buildWorkflow, /permissions:\n  contents: read/);
+assert.match(buildWorkflow, /node --test scripts\/mte-server-runtime-closure\.test\.mjs/);
 assert.doesNotMatch(buildWorkflow, /packages: write|id-token: write|push: true/);
 assert.match(publishWorkflow, /permissions:\n  contents: write\n  packages: write\n  id-token: write/);
 for (const workflow of [buildWorkflow, publishWorkflow]) {
@@ -126,6 +132,13 @@ assert.match(runtimePruner, /mode & ~0o111/);
 assert.match(runtimeVerifier, /runtime package exposes a bin entry/);
 assert.match(runtimeVerifier, /executable file outside the runtime allowlist/);
 assert.match(runtimeVerifier, /transitive package manifests were not inspected/);
+assert.match(workspaceNormalizer, /@paperclipai\//);
+assert.match(workspaceNormalizer, /publishConfig\?\.exports/);
+assert.match(workspaceNormalizer, /production export is missing/);
+assert.match(workspaceNormalizer, /resolves outside the deployed server closure/);
+assert.match(serverRuntimeSmoke, /dist\/index\.js/);
+assert.match(serverRuntimeSmoke, /\/api\/health/);
+assert.match(serverRuntimeSmoke, /server runtime smoke failed before health/);
 
 const abi = JSON.parse(imageAbi);
 assert.deepEqual(abi.verifyCommand, ["node", "/app/image-abi/verify.mjs"]);

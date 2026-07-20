@@ -290,6 +290,7 @@ test("legacy agent runtime publication targets the current fork namespace", asyn
 
 test("Docker closure deploys and verifies the stable image ABI", async () => {
   const dockerfile = await read("Dockerfile.mte");
+  const buildWorkflow = await read(".github/workflows/mte-image-build.yml");
   assert.match(dockerfile, /pnpm -C \/tmp\/mte-daytona-build install --frozen-lockfile --ignore-scripts/);
   assert.match(dockerfile, /cp -R \/tmp\/mte-daytona-build\/package\.json[\s\S]*\/opt\/runtime\/plugins\/daytona/);
   assert.match(
@@ -305,9 +306,13 @@ test("Docker closure deploys and verifies the stable image ABI", async () => {
     /ln -s \.\.\/\.\.\/\.\.\/plugins\/daytona\/node_modules\/@daytonaio\/sdk \/opt\/runtime\/server\/node_modules\/@daytonaio\/sdk/,
   );
   assert.doesNotMatch(dockerfile, /--filter @paperclipai\/plugin-daytona(?:\.\.\.)? (?:build|deploy)/);
+  assert.match(dockerfile, /node scripts\/normalize-mte-workspace-exports\.mjs \/opt\/runtime\/server/);
+  assert.match(dockerfile, /cp scripts\/smoke-mte-server-runtime\.mjs \/opt\/runtime\/image-abi\/smoke-server\.mjs/);
+  assert.match(dockerfile, /USER node\n\nRUN node \/app\/image-abi\/smoke-server\.mjs \/app\/server/);
   assert.match(dockerfile, /node scripts\/verify-mte-runtime\.mjs \/opt\/runtime/);
   assert.match(dockerfile, /node \/opt\/runtime\/image-abi\/verify\.mjs \/opt\/runtime/);
   assert.doesNotMatch(dockerfile, /pi-coding-agent|codex-acp|agent-runtime-(?:pi|codex|claude)/i);
+  assert.match(buildWorkflow, /node --test scripts\/mte-server-runtime-closure\.test\.mjs/);
 });
 
 test("release finalization is gated on exact-digest SBOM and provenance", async () => {
