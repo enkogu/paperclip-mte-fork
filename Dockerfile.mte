@@ -27,6 +27,8 @@ RUN corepack enable \
   && ln -s ../../../shared /opt/runtime/plugins/daytona/local/plugin-sdk/node_modules/@paperclipai/shared \
   && mkdir -p /opt/runtime/server/node_modules/@paperclipai \
   && ln -s ../../../plugins/daytona /opt/runtime/server/node_modules/@paperclipai/plugin-daytona \
+  && mkdir -p /opt/runtime/server/node_modules/@daytonaio \
+  && ln -s ../../../plugins/daytona/node_modules/@daytonaio/sdk /opt/runtime/server/node_modules/@daytonaio/sdk \
   && mkdir -p /opt/runtime/image-abi \
   && cp scripts/verify-mte-image-abi.mjs /opt/runtime/image-abi/verify.mjs \
   && cp scripts/mte-image-abi.json /opt/runtime/image-abi/manifest.json \

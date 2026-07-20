@@ -300,6 +300,10 @@ test("Docker closure deploys and verifies the stable image ABI", async () => {
     dockerfile,
     /ln -s \.\.\/\.\.\/\.\.\/plugins\/daytona \/opt\/runtime\/server\/node_modules\/@paperclipai\/plugin-daytona/,
   );
+  assert.match(
+    dockerfile,
+    /ln -s \.\.\/\.\.\/\.\.\/plugins\/daytona\/node_modules\/@daytonaio\/sdk \/opt\/runtime\/server\/node_modules\/@daytonaio\/sdk/,
+  );
   assert.doesNotMatch(dockerfile, /--filter @paperclipai\/plugin-daytona(?:\.\.\.)? (?:build|deploy)/);
   assert.match(dockerfile, /node scripts\/verify-mte-runtime\.mjs \/opt\/runtime/);
   assert.match(dockerfile, /node \/opt\/runtime\/image-abi\/verify\.mjs \/opt\/runtime/);
