@@ -26,6 +26,8 @@ const [dockerfile, notice, buildWorkflow, publishWorkflow, legacyRuntimeWorkflow
   read("packages/plugins/sandbox-providers/daytona/image-build/package.json"),
   read("packages/plugins/sandbox-providers/daytona/image-build/pnpm-lock.yaml"),
 ]);
+const rootPackage = JSON.parse(await read("package.json"));
+const rootLock = await read("pnpm-lock.yaml");
 
 assert.match(
   dockerfile,
@@ -134,9 +136,42 @@ assert.equal(daytonaBuildNpmrc.trim(), "shared-workspace-lockfile=false");
 const isolatedDaytonaPackage = JSON.parse(daytonaBuildPackage);
 assert.equal(isolatedDaytonaPackage.dependencies["@daytonaio/sdk"], "0.175.0");
 assert.equal(isolatedDaytonaPackage.dependencies["@paperclipai/plugin-sdk"], "file:./local/plugin-sdk");
+assert.equal(
+  isolatedDaytonaPackage.pnpm?.overrides?.["@opentelemetry/otlp-transformer>protobufjs"],
+  "8.4.1",
+  "the isolated Daytona closure must pin the patched protobufjs release without forcing grpc off protobufjs 7",
+);
 assert.match(daytonaBuildLock, /specifier: 0\.175\.0\n\s+version: 0\.175\.0\(ws@/);
 assert.match(daytonaBuildLock, /'@paperclipai\/plugin-sdk@file:local\/plugin-sdk'/);
 assert.match(daytonaBuildLock, /'@paperclipai\/shared@file:local\/shared'/);
+assert.match(daytonaBuildLock, /^  protobufjs@8\.4\.1:$/m);
+assert.doesNotMatch(daytonaBuildLock, /^  protobufjs@(?:8\.[0-3]\.|8\.4\.0:)/m);
+
+assert.deepEqual(
+  Object.fromEntries(
+    ["fast-uri", "form-data", "hono", "path-to-regexp", "ws"].map((name) => [
+      name,
+      rootPackage.pnpm?.overrides?.[name],
+    ]),
+  ),
+  {
+    "fast-uri": "3.1.2",
+    "form-data": "4.0.6",
+    hono: "4.12.25",
+    "path-to-regexp": "8.4.0",
+    ws: "8.21.1",
+  },
+  "root runtime security overrides must remain exact and lockfile-auditable",
+);
+for (const vulnerable of [
+  /^  fast-uri@3\.1\.[01]:$/m,
+  /^  form-data@4\.0\.[0-5]:$/m,
+  /^  hono@4\.12\.(?:[0-9]|1[0-9]|2[0-4]):$/m,
+  /^  path-to-regexp@8\.[0-3]\./m,
+  /^  ws@8\.(?:[0-9]|1[0-9]|20)\./m,
+]) {
+  assert.doesNotMatch(rootLock, vulnerable, `root lock retains vulnerable runtime package: ${vulnerable}`);
+}
 
 assert.doesNotMatch(legacyRuntimeWorkflow, /ghcr\.io\/paperclipai/, "public forks must not publish into the upstream registry");
 assert.match(legacyRuntimeWorkflow, /REGISTRY=ghcr\.io\/\$\{GITHUB_REPOSITORY_OWNER,,\}/);
