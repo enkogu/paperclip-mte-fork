@@ -16,6 +16,7 @@ import {
   issueRelations,
   issues,
   pluginManagedResources,
+  pluginCompanySettings,
   plugins,
   projects,
 } from "@paperclipai/db";
@@ -317,6 +318,7 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
       createEventBusStub(),
       undefined,
       {
+        localFolderAllowedRoots: () => [root],
         manifest: {
           id: "paperclipai.plugin-llm-wiki",
           apiVersion: 1,
@@ -447,6 +449,131 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
       relativePath: "id_rsa",
       contents: "secret",
     })).rejects.toThrow("Local folder key is not declared");
+  });
+
+  it("confines worker local-folder grants and rejects untrusted stored host paths", async () => {
+    const { companyId } = await seedCompanyAndAgent();
+    const pluginId = randomUUID();
+    const manifest = {
+      id: "paperclip.local-folders",
+      apiVersion: 1 as const,
+      version: "0.1.0",
+      displayName: "Local Folders",
+      description: "Local folder fixture",
+      author: "Paperclip",
+      categories: ["automation"],
+      capabilities: ["local.folders"],
+      entrypoints: { worker: "./dist/worker.js" },
+      localFolders: [{
+        folderKey: "content-root",
+        displayName: "Content root",
+        access: "readWrite" as const,
+      }],
+    };
+    await db.insert(plugins).values({
+      id: pluginId,
+      pluginKey: manifest.id,
+      packageName: "@paperclip/plugin-local-folders",
+      version: manifest.version,
+      manifestJson: manifest,
+      status: "ready",
+    });
+    const allowedRoot = await makeLocalRoot();
+    const outside = await makeLocalRoot();
+    await fs.writeFile(path.join(outside, "secret.txt"), "host-secret", "utf8");
+    await fs.symlink(outside, path.join(allowedRoot, "escape"));
+    const services = buildHostServices(
+      db,
+      pluginId,
+      manifest.id,
+      createEventBusStub(),
+      undefined,
+      { manifest, localFolderAllowedRoots: () => [allowedRoot] },
+    );
+
+    for (const configuredPath of [
+      "/",
+      "/etc",
+      `${allowedRoot}-sibling`,
+      `${allowedRoot}/nested/../../outside`,
+      path.join(allowedRoot, "escape"),
+    ]) {
+      await expect(services.localFolders.configure({
+        companyId,
+        folderKey: "content-root",
+        path: configuredPath,
+        access: "readWrite",
+      })).rejects.toMatchObject({ status: 403 });
+    }
+    expect(await db.select().from(pluginCompanySettings)).toEqual([]);
+
+    const configuredPath = path.join(allowedRoot, "content");
+    const configured = await services.localFolders.configure({
+      companyId,
+      folderKey: "content-root",
+      path: configuredPath,
+      access: "readWrite",
+    });
+    expect(configured.path).toBe(configuredPath);
+
+    await db.update(pluginCompanySettings).set({
+      settingsJson: {
+        localFolders: {
+          "content-root": { path: outside, access: "readWrite" },
+        },
+      },
+    }).where(and(
+      eq(pluginCompanySettings.pluginId, pluginId),
+      eq(pluginCompanySettings.companyId, companyId),
+    ));
+
+    await expect(services.localFolders.status({ companyId, folderKey: "content-root" }))
+      .rejects.toMatchObject({ status: 403 });
+    await expect(services.localFolders.list({ companyId, folderKey: "content-root" }))
+      .rejects.toMatchObject({ status: 403 });
+    await expect(services.localFolders.readText({
+      companyId,
+      folderKey: "content-root",
+      relativePath: "secret.txt",
+    })).rejects.toMatchObject({ status: 403 });
+    await expect(services.localFolders.writeTextAtomic({
+      companyId,
+      folderKey: "content-root",
+      relativePath: "created.txt",
+      contents: "nope",
+    })).rejects.toMatchObject({ status: 403 });
+    await expect(fs.readFile(path.join(outside, "secret.txt"), "utf8")).resolves.toBe("host-secret");
+    await expect(fs.stat(path.join(outside, "created.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+
+    await db.update(pluginCompanySettings).set({
+      settingsJson: {
+        localFolders: {
+          "content-root": {
+            path: outside,
+            authorizedRoot: outside,
+            access: "readWrite",
+          },
+        },
+      },
+    }).where(and(
+      eq(pluginCompanySettings.pluginId, pluginId),
+      eq(pluginCompanySettings.companyId, companyId),
+    ));
+    await expect(services.localFolders.status({ companyId, folderKey: "content-root" }))
+      .resolves.toMatchObject({ healthy: true, realPath: outside });
+    await expect(services.localFolders.readText({
+      companyId,
+      folderKey: "content-root",
+      relativePath: "secret.txt",
+    })).resolves.toBe("host-secret");
+    await services.localFolders.writeTextAtomic({
+      companyId,
+      folderKey: "content-root",
+      relativePath: "created.txt",
+      contents: "operator-approved",
+    });
+    await expect(fs.readFile(path.join(outside, "created.txt"), "utf8"))
+      .resolves.toBe("operator-approved");
   });
 
   it("resolves plugin-managed projects by stable key without overwriting user edits", async () => {

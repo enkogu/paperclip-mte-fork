@@ -74,6 +74,8 @@ import {
 } from "./authz.js";
 import { validateInstanceConfig } from "../services/plugin-config-validator.js";
 import {
+  assertPluginLocalFolderPathAllowed,
+  defaultLocalFolderBasePath,
   findLocalFolderDeclaration,
   getStoredLocalFolders,
   inspectPluginLocalFolder,
@@ -2733,6 +2735,11 @@ export function pluginRoutes(
     }
 
     const declaration = requireLocalFolderDeclaration(plugin.manifestJson.localFolders ?? [], folderKey);
+    await assertPluginLocalFolderPathAllowed({
+      configuredPath: body.path,
+      allowedRoots: [defaultLocalFolderBasePath(plugin.pluginKey, companyId)],
+      allowArbitraryHostPath: req.actor.source === "local_implicit" || req.actor.isInstanceAdmin,
+    });
     const status = await inspectPluginLocalFolder({
       folderKey,
       declaration,
@@ -2765,8 +2772,13 @@ export function pluginRoutes(
       return;
     }
 
-    const existing = await registry.getCompanySettings(plugin.id, companyId);
     const declaration = requireLocalFolderDeclaration(plugin.manifestJson.localFolders ?? [], folderKey);
+    await assertPluginLocalFolderPathAllowed({
+      configuredPath: body.path,
+      allowedRoots: [defaultLocalFolderBasePath(plugin.pluginKey, companyId)],
+      allowArbitraryHostPath: req.actor.source === "local_implicit" || req.actor.isInstanceAdmin,
+    });
+    const existing = await registry.getCompanySettings(plugin.id, companyId);
     const status = await inspectPluginLocalFolder({
       folderKey,
       declaration,
@@ -2778,6 +2790,9 @@ export function pluginRoutes(
 
     const nextSettings = setStoredLocalFolder(existing?.settingsJson, folderKey, {
       path: body.path,
+      authorizedRoot: req.actor.source === "local_implicit" || req.actor.isInstanceAdmin
+        ? path.resolve(body.path)
+        : undefined,
       access: status.access,
       requiredDirectories: status.requiredDirectories,
       requiredFiles: status.requiredFiles,

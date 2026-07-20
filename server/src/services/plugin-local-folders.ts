@@ -13,6 +13,8 @@ import { badRequest, forbidden, notFound } from "../errors.js";
 
 export interface StoredPluginLocalFolderConfig {
   path: string;
+  /** Exact operator-approved root for host paths outside the scoped plugin data directory. */
+  authorizedRoot?: string;
   access?: "read" | "readWrite";
   requiredDirectories?: string[];
   requiredFiles?: string[];
@@ -271,6 +273,65 @@ export async function inspectPluginLocalFolder(input: {
 function isInsideRoot(rootRealPath: string, candidateRealPath: string) {
   const relative = path.relative(rootRealPath, candidateRealPath);
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+async function resolveNearestExistingRealPath(inputPath: string) {
+  let currentPath = inputPath;
+  while (true) {
+    try {
+      return {
+        realPath: await fs.realpath(currentPath),
+        requestedPathExists: currentPath === inputPath,
+      };
+    } catch (error) {
+      const code = typeof error === "object" && error && "code" in error
+        ? String((error as { code?: unknown }).code)
+        : "";
+      if (code !== "ENOENT") throw error;
+      const parentPath = path.dirname(currentPath);
+      if (parentPath === currentPath) throw error;
+      currentPath = parentPath;
+    }
+  }
+}
+
+/**
+ * Restrict a board member's configured host path to an operator-selected root.
+ * Lexical containment is checked before any filesystem operation so an
+ * untrusted request cannot use validation as a host path existence oracle.
+ */
+export async function assertPluginLocalFolderPathAllowed(input: {
+  configuredPath: string;
+  allowedRoots: string[];
+  allowArbitraryHostPath?: boolean;
+}) {
+  if (input.allowArbitraryHostPath) return;
+
+  if (
+    !path.isAbsolute(input.configuredPath)
+    || input.configuredPath.split(/[\\/]+/).includes("..")
+  ) {
+    throw forbidden("Local folder path must be absolute and stay inside an allowed root");
+  }
+
+  const configuredPath = path.resolve(input.configuredPath);
+  const allowedRoot = input.allowedRoots
+    .map((root) => path.resolve(root))
+    .find((root) => isInsideRoot(root, configuredPath));
+  if (!allowedRoot) {
+    throw forbidden("Local folder path is outside the allowed plugin data root");
+  }
+
+  const [rootResolution, configuredResolution] = await Promise.all([
+    resolveNearestExistingRealPath(allowedRoot),
+    resolveNearestExistingRealPath(configuredPath),
+  ]);
+  const contained = rootResolution.requestedPathExists
+    ? isInsideRoot(rootResolution.realPath, configuredResolution.realPath)
+    : rootResolution.realPath === configuredResolution.realPath;
+  if (!contained) {
+    throw forbidden("Local folder symlink escape is not allowed");
+  }
 }
 
 async function assertPathInsideRoot(rootRealPath: string, candidatePath: string) {

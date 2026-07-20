@@ -50,7 +50,9 @@ import { pluginManagedRoutineService } from "./plugin-managed-routines.js";
 import { pluginManagedSkillService } from "./plugin-managed-skills.js";
 import {
   assertConfiguredLocalFolder,
+  assertPluginLocalFolderPathAllowed,
   assertWritableConfiguredLocalFolder,
+  defaultLocalFolderBasePath,
   getStoredLocalFolders,
   deletePluginLocalFolderFile,
   inspectPluginLocalFolder,
@@ -493,7 +495,11 @@ export function buildHostServices(
   pluginKey: string,
   eventBus: PluginEventBus,
   notifyWorker?: (method: string, params: unknown) => void,
-  options: { pluginWorkerManager?: PluginWorkerManager; manifest?: import("@paperclipai/shared").PaperclipPluginManifestV1 } = {},
+  options: {
+    pluginWorkerManager?: PluginWorkerManager;
+    manifest?: import("@paperclipai/shared").PaperclipPluginManifestV1;
+    localFolderAllowedRoots?: (companyId: string) => string[];
+  } = {},
 ): HostServices & { dispose(): void } {
   const registry = pluginRegistryService(db);
   const stateStore = pluginStateStore(db);
@@ -602,11 +608,33 @@ export function buildHostServices(
     return getStoredLocalFolders(settings?.settingsJson)[folderKey] ?? null;
   };
 
+  const validateStoredLocalFolderConfig = async (
+    companyId: string,
+    config: Awaited<ReturnType<typeof getStoredLocalFolderConfig>>,
+  ) => {
+    if (!config?.path) return config;
+    await assertPluginLocalFolderPathAllowed({
+      configuredPath: config.path,
+      allowedRoots: [
+        ...(options.localFolderAllowedRoots?.(companyId)
+          ?? [defaultLocalFolderBasePath(pluginKey, companyId)]),
+        ...(config.authorizedRoot ? [config.authorizedRoot] : []),
+      ],
+    });
+    return config;
+  };
+
+  const getValidatedStoredLocalFolderConfig = async (companyId: string, folderKey: string) =>
+    validateStoredLocalFolderConfig(
+      companyId,
+      await getStoredLocalFolderConfig(companyId, folderKey),
+    );
+
   const inspectStoredLocalFolder = async (companyId: string, folderKey: string) =>
     inspectPluginLocalFolder({
       folderKey,
       declaration: getLocalFolderDeclaration(folderKey),
-      storedConfig: await getStoredLocalFolderConfig(companyId, folderKey),
+      storedConfig: await getValidatedStoredLocalFolderConfig(companyId, folderKey),
     });
 
   const inCompany = <T extends { companyId: string | null | undefined }>(
@@ -1077,6 +1105,11 @@ export function buildHostServices(
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
         const declaration = getLocalFolderDeclaration(params.folderKey);
+        await assertPluginLocalFolderPathAllowed({
+          configuredPath: params.path,
+          allowedRoots: options.localFolderAllowedRoots?.(companyId)
+            ?? [defaultLocalFolderBasePath(pluginKey, companyId)],
+        });
         const existing = await registry.getCompanySettings(pluginId, companyId);
         const existingConfig = getStoredLocalFolders(existing?.settingsJson)[params.folderKey] ?? null;
         await preparePluginLocalFolder({
@@ -1136,7 +1169,7 @@ export function buildHostServices(
         await preparePluginLocalFolder({
           folderKey: params.folderKey,
           declaration: getLocalFolderDeclaration(params.folderKey),
-          storedConfig: await getStoredLocalFolderConfig(companyId, params.folderKey),
+          storedConfig: await getValidatedStoredLocalFolderConfig(companyId, params.folderKey),
         });
         const status = await inspectStoredLocalFolder(companyId, params.folderKey);
         assertWritableConfiguredLocalFolder(status);

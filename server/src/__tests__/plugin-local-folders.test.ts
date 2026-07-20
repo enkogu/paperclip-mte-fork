@@ -4,6 +4,7 @@ import path from "node:path";
 import { promises as fs } from "node:fs";
 import {
   assertConfiguredLocalFolder,
+  assertPluginLocalFolderPathAllowed,
   assertWritableConfiguredLocalFolder,
   inspectPluginLocalFolder,
   listPluginLocalFolderEntries,
@@ -187,6 +188,49 @@ describe("plugin local folders", () => {
     await expect(resolvePluginLocalFolderPath(root, "../outside.txt")).rejects.toMatchObject({
       status: 403,
     });
+  });
+
+  it("rejects disallowed host roots lexically before filesystem inspection", async () => {
+    const allowedRoot = await makeRoot();
+    const realpathSpy = vi.spyOn(fs, "realpath");
+
+    try {
+      for (const configuredPath of [
+        "/",
+        "/etc",
+        `${allowedRoot}-sibling`,
+        path.join(allowedRoot, "..", "outside"),
+      ]) {
+        await expect(assertPluginLocalFolderPathAllowed({
+          configuredPath,
+          allowedRoots: [allowedRoot],
+        })).rejects.toMatchObject({ status: 403 });
+      }
+      expect(realpathSpy).not.toHaveBeenCalled();
+    } finally {
+      realpathSpy.mockRestore();
+    }
+  });
+
+  it("rejects an allowed-root child symlink that escapes to the host", async () => {
+    const allowedRoot = await makeRoot();
+    const outside = await makeRoot();
+    await fs.symlink(outside, path.join(allowedRoot, "linked-outside"));
+
+    await expect(assertPluginLocalFolderPathAllowed({
+      configuredPath: path.join(allowedRoot, "linked-outside"),
+      allowedRoots: [allowedRoot],
+    })).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("allows an authorized path contained by the selected root", async () => {
+    const allowedRoot = await makeRoot();
+    const configuredPath = path.join(allowedRoot, "content");
+
+    await expect(assertPluginLocalFolderPathAllowed({
+      configuredPath,
+      allowedRoots: [allowedRoot],
+    })).resolves.toBeUndefined();
   });
 
   it("detects required symlinks that escape the configured folder", async () => {
