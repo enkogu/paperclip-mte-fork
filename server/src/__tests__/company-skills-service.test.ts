@@ -3,7 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import { promises as fs } from "node:fs";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { agents, companies, companySkills, createDb } from "@paperclipai/db";
+import { eq } from "drizzle-orm";
+import { agents, companies, companySkillVersions, companySkills, createDb } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -687,7 +688,9 @@ describeEmbeddedPostgres("companySkillService.list", () => {
       requireBoardApprovalForNewAgents: false,
     });
 
-    const result = await svc.importFromSource(companyId, path.join(skillDir, "SKILL.md"));
+    const result = await svc.importFromSource(companyId, path.join(skillDir, "SKILL.md"), {
+      allowedLocalRoots: [skillDir],
+    });
 
     expect(result.imported).toHaveLength(1);
     expect(new Set(result.imported[0]?.fileInventory.map((entry) => `${entry.kind}:${entry.path}`))).toEqual(new Set([
@@ -718,13 +721,90 @@ describeEmbeddedPostgres("companySkillService.list", () => {
       requireBoardApprovalForNewAgents: false,
     });
 
-    const result = await svc.importFromSource(companyId, path.join(repoDir, "SKILL.md"));
+    const result = await svc.importFromSource(companyId, path.join(repoDir, "SKILL.md"), { allowAnyLocalPath: true });
 
     expect(result.imported).toHaveLength(1);
     expect(result.imported[0]?.fileInventory.map((entry) => entry.path).sort()).toEqual([
       "SKILL.md",
       "references/guide.md",
     ]);
+  });
+
+  it("fails closed for local imports outside operator authorization and symlink escapes", async () => {
+    const companyId = randomUUID();
+    const allowedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-allowed-skill-root-"));
+    const outsideRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-outside-skill-root-"));
+    cleanupDirs.add(allowedRoot);
+    cleanupDirs.add(outsideRoot);
+    await fs.writeFile(path.join(outsideRoot, "SKILL.md"), "# Outside\n", "utf8");
+    await fs.symlink(outsideRoot, path.join(allowedRoot, "escaped"));
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await expect(svc.importFromSource(companyId, path.join(outsideRoot, "SKILL.md")))
+      .rejects.toMatchObject({ status: 403 });
+    await expect(svc.importFromSource(companyId, path.join(allowedRoot, "escaped", "SKILL.md"), {
+      allowedLocalRoots: [allowedRoot],
+    })).rejects.toMatchObject({ status: 403 });
+    await expect(fs.readFile(path.join(outsideRoot, "SKILL.md"), "utf8")).resolves.toBe("# Outside\n");
+  });
+
+  it("rejects malicious persisted inventory and version paths before filesystem access", async () => {
+    const companyId = randomUUID();
+    const skillId = randomUUID();
+    const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-inventory-outside-"));
+    cleanupDirs.add(outsideDir);
+    const sentinel = path.join(outsideDir, "sentinel.txt");
+    await fs.writeFile(sentinel, "do-not-touch", "utf8");
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(companySkills).values({
+      id: skillId,
+      companyId,
+      key: `company/${companyId}/malicious-inventory`,
+      slug: "malicious-inventory",
+      name: "Malicious inventory",
+      markdown: "# Stored fallback\n",
+      sourceType: "local_path",
+      sourceLocator: path.join(outsideDir, "missing"),
+      trustLevel: "markdown_only",
+      compatibility: "compatible",
+      fileInventory: [{ path: "../../sentinel.txt", kind: "skill" }],
+    });
+
+    for (const maliciousPath of [
+      "../../sentinel.txt",
+      "/tmp/absolute.txt",
+      "..\\..\\sentinel.txt",
+      "references//guide.md",
+      "./SKILL.md",
+      "",
+    ]) {
+      await db.update(companySkills)
+        .set({ fileInventory: [{ path: maliciousPath, kind: "skill" }] })
+        .where(eq(companySkills.id, skillId));
+      await expect(svc.getById(companyId, skillId)).rejects.toMatchObject({ status: 422 });
+    }
+
+    const versionId = randomUUID();
+    await db.update(companySkills).set({ fileInventory: [{ path: "SKILL.md", kind: "skill" }] }).where(eq(companySkills.id, skillId));
+    await db.insert(companySkillVersions).values({
+      id: versionId,
+      companyId,
+      companySkillId: skillId,
+      revisionNumber: 1,
+      fileInventory: [{ path: "..\\..\\sentinel.txt", kind: "skill", content: "overwrite" }],
+    });
+    await expect(svc.getVersion(companyId, skillId, versionId)).rejects.toMatchObject({ status: 422 });
+    await expect(fs.readFile(sentinel, "utf8")).resolves.toBe("do-not-touch");
   });
 
   it("rejects executable external package skills before persistence", async () => {

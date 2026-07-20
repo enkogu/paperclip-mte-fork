@@ -949,6 +949,47 @@ describe("company skill mutation permissions", () => {
     );
   });
 
+  it("does not let an agent skills:create grant authorize arbitrary local filesystem imports", async () => {
+    mockAgentService.getById.mockResolvedValue({
+      id: "agent-1",
+      companyId: "company-1",
+      permissions: { canCreateSkills: false },
+    });
+    mockAccessService.hasPermission.mockResolvedValue(true);
+
+    const res = await request(await createApp({
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "company-1",
+      runId: "run-1",
+    }))
+      .post("/api/companies/company-1/skills/import")
+      .send({ source: "/private/tmp/operator-only/SKILL.md" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toContain("Local skill imports require");
+    expect(mockCompanySkillService.importFromSource).not.toHaveBeenCalled();
+  });
+
+  it("allows an instance administrator to request a local filesystem import", async () => {
+    const source = "/private/tmp/operator-skill/SKILL.md";
+    const res = await request(await createApp({
+      type: "board",
+      userId: "admin-1",
+      companyIds: ["company-1"],
+      source: "session",
+      isInstanceAdmin: true,
+    }))
+      .post("/api/companies/company-1/skills/import")
+      .send({ source });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockCompanySkillService.importFromSource).toHaveBeenCalledWith("company-1", source, {
+      allowAnyLocalPath: true,
+      allowedLocalRoots: [],
+    });
+  });
+
   it("does not allow explicit agents:create grants to mutate company skills", async () => {
     mockAgentService.getById.mockResolvedValue({
       id: "agent-1",

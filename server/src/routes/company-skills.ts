@@ -1,3 +1,4 @@
+import path from "node:path";
 import { Router, type Request } from "express";
 import type { Db } from "@paperclipai/db";
 import {
@@ -77,6 +78,19 @@ export function companySkillRoutes(db: Db) {
     if (typeof value === "string") return [value];
     if (Array.isArray(value)) return value.filter((entry): entry is string => typeof entry === "string");
     return [];
+  }
+
+  function requestsLocalSkillImport(source: string) {
+    const trimmed = source.trim();
+    if (/^https?:\/\//i.test(trimmed) || /^npx\s+skills\s+add\s+/i.test(trimmed)) return false;
+    return !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?$/.test(trimmed);
+  }
+
+  function operatorAllowedLocalSkillRoots() {
+    return (process.env.PAPERCLIP_LOCAL_SKILL_IMPORT_ROOTS ?? "")
+      .split(path.delimiter)
+      .map((entry) => entry.trim())
+      .filter(Boolean);
   }
 
   function skillActor(req: Request) {
@@ -497,7 +511,18 @@ export function companySkillRoutes(db: Db) {
       const companyId = req.params.companyId as string;
       await assertCanMutateCompanySkills(req, companyId);
       const source = String(req.body.source ?? "");
-      const result = await svc.importFromSource(companyId, source);
+      const localImport = requestsLocalSkillImport(source);
+      const allowAnyLocalPath = req.actor.type === "board"
+        && (req.actor.source === "local_implicit" || Boolean(req.actor.isInstanceAdmin));
+      const allowedLocalRoots = operatorAllowedLocalSkillRoots();
+      if (localImport && !allowAnyLocalPath && allowedLocalRoots.length === 0) {
+        throw forbidden(
+          "Local skill imports require an instance administrator, local implicit operator, or an operator-allowlisted root.",
+        );
+      }
+      const result = localImport
+        ? await svc.importFromSource(companyId, source, { allowAnyLocalPath, allowedLocalRoots })
+        : await svc.importFromSource(companyId, source);
 
       const actor = getActorInfo(req);
       await logActivity(db, {
