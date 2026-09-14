@@ -17,11 +17,11 @@
     "build": "tsc"
   },
   "dependencies": {
-    "@daytonaio/sdk": "0.175.0",
+    "@daytonaio/sdk": "0.211.2",
     "@paperclipai/plugin-sdk": "file:./local/plugin-sdk"
   },
   "devDependencies": {
-    "@types/node": "^24.6.0",
+    "@types/node": "^24.13.4",
     "typescript": "^5.7.3"
   },
   "pnpm": {
